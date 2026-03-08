@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UltraProxy</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #080811; --surface: #0f0f1e; --surface2: #161628; --border: #1f1f3a;
+      --border-glow: #3d3d7a; --accent: #6c63ff; --accent3: #00d4ff;
+      --text: #e8e8f0; --text-muted: #7070a0;
+      --bar-h: 58px;
+      --font-ui: 'Syne', system-ui, sans-serif;
+      --font-mono: 'Space Mono', monospace;
+    }
+    html, body { height: 100%; overflow: hidden; background: var(--bg); color: var(--text); font-family: var(--font-ui); }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: var(--surface); }
+    ::-webkit-scrollbar-thumb { background: var(--border-glow); border-radius: 3px; }
+    #app { display: flex; flex-direction: column; height: 100vh; }
+
+    /* ── Top Bar ─────────────────────────── */
+    #topbar {
+      display: flex; align-items: center; gap: 8px;
+      height: var(--bar-h); padding: 0 12px;
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      flex-shrink: 0; position: relative; z-index: 100;
+    }
+    #topbar::after {
+      content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, var(--accent) 30%, var(--accent3) 70%, transparent);
+      opacity: .4;
+    }
+    .logo { display: flex; align-items: center; gap: 8px; cursor: pointer; padding: 4px 8px; border-radius: 8px; transition: background .15s; flex-shrink: 0; }
+    .logo:hover { background: var(--surface2); }
+    .logo-mark { width: 30px; height: 30px; background: linear-gradient(135deg, var(--accent), var(--accent3)); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
+    .logo-text { font-weight: 800; font-size: 1em; letter-spacing: -.02em; color: var(--text); line-height: 1; }
+    .logo-text span { color: var(--accent3); }
+    .nav-btn { display: flex; align-items: center; justify-content: center; width: 34px; height: 34px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; color: var(--text-muted); cursor: pointer; font-size: 14px; transition: all .15s; flex-shrink: 0; user-select: none; }
+    .nav-btn:hover { border-color: var(--border-glow); color: var(--text); }
+    .nav-btn:active { transform: scale(.94); }
+    #urlbar-wrap { flex: 1; display: flex; align-items: center; background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 0 14px 0 12px; gap: 8px; height: 38px; transition: border-color .2s, box-shadow .2s; max-width: 900px; min-width: 0; }
+    #urlbar-wrap:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(108,99,255,.15); }
+    .urlbar-icon { color: var(--text-muted); font-size: 13px; flex-shrink: 0; }
+    #urlbar { flex: 1; background: none; border: none; outline: none; color: var(--text); font-family: var(--font-mono); font-size: .72em; min-width: 0; }
+    #urlbar::placeholder { color: var(--text-muted); }
+    #go-btn { background: linear-gradient(135deg, var(--accent), var(--accent3)); border: none; border-radius: 14px; color: #fff; cursor: pointer; padding: 0 14px; height: 28px; font-family: var(--font-ui); font-size: .75em; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; transition: opacity .15s, transform .1s; flex-shrink: 0; }
+    #go-btn:hover { opacity: .88; } #go-btn:active { transform: scale(.95); }
+    #dl-btn { display: flex; align-items: center; gap: 6px; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; color: var(--text-muted); cursor: pointer; padding: 0 12px; height: 34px; font-family: var(--font-ui); font-size: .75em; font-weight: 600; white-space: nowrap; transition: all .15s; flex-shrink: 0; text-decoration: none; }
+    #dl-btn:hover { border-color: var(--accent3); color: var(--accent3); }
+    #loader { position: absolute; bottom: 0; left: 0; height: 2px; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent3)); z-index: 200; }
+    #loader.loading { animation: ldpulse 1.5s ease infinite; }
+    #loader.done    { width: 100%; opacity: 0; transition: width .15s, opacity .3s .15s; }
+    @keyframes ldpulse { 0%{width:10%}50%{width:72%}100%{width:85%} }
+
+    /* ── Content ─────────────────────────── */
+    #content { flex: 1; position: relative; overflow: hidden; }
+    #proxy-frame { position: absolute; inset: 0; width: 100%; height: 100%; border: none; background: #fff; display: none; }
+    #proxy-frame.visible { display: block; }
+
+    /* ── Home ────────────────────────────── */
+    #home {
+      position: absolute; inset: 0;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 28px; padding: 40px 20px; overflow-y: auto;
+      background:
+        radial-gradient(ellipse 80% 60% at 50% 0%, rgba(108,99,255,.12) 0%, transparent 60%),
+        radial-gradient(ellipse 60% 40% at 80% 100%, rgba(0,212,255,.08) 0%, transparent 50%),
+        var(--bg);
+    }
+    #home.hidden { display: none; }
+
+    .hero { text-align: center; animation: fadeIn .5s ease both; }
+    .hero-badge { display: inline-block; background: rgba(108,99,255,.15); border: 1px solid rgba(108,99,255,.3); border-radius: 20px; padding: 4px 14px; font-size: .7em; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--accent3); margin-bottom: 18px; }
+    .hero-title { font-size: clamp(2em, 5vw, 3.8em); font-weight: 800; letter-spacing: -.04em; line-height: 1; margin-bottom: 10px; background: linear-gradient(135deg, #fff 30%, var(--accent3)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .hero-sub { font-size: .9em; color: var(--text-muted); max-width: 440px; margin: 0 auto; line-height: 1.6; }
+
+    .notice { background: rgba(255,100,80,.07); border: 1px solid rgba(255,100,80,.2); border-radius: 10px; padding: 10px 16px; font-size: .75em; color: #f87171; max-width: 620px; width: 100%; line-height: 1.6; animation: fadeIn .5s ease .05s both; }
+    .notice strong { color: #fca5a5; }
+
+    .search-area { width: 100%; max-width: 620px; animation: fadeIn .5s ease .1s both; }
+    .search-form { display: flex; gap: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 8px 8px 8px 18px; align-items: center; transition: border-color .2s, box-shadow .2s; }
+    .search-form:focus-within { border-color: var(--accent); box-shadow: 0 0 0 4px rgba(108,99,255,.12), 0 8px 40px rgba(0,0,0,.4); }
+    .si-icon { color: var(--text-muted); font-size: 16px; flex-shrink: 0; }
+    #search-input { flex: 1; background: none; border: none; outline: none; color: var(--text); font-family: var(--font-ui); font-size: 1em; min-width: 0; }
+    #search-input::placeholder { color: var(--text-muted); }
+    .search-btn { background: linear-gradient(135deg, var(--accent), var(--accent3)); border: none; border-radius: 10px; color: #fff; cursor: pointer; padding: 10px 20px; font-family: var(--font-ui); font-size: .88em; font-weight: 700; transition: opacity .15s, transform .1s; white-space: nowrap; }
+    .search-btn:hover { opacity: .88; } .search-btn:active { transform: scale(.96); }
+
+    .pills { display: flex; gap: 8px; justify-content: center; margin-top: 12px; flex-wrap: wrap; }
+    .pill { display: flex; align-items: center; gap: 5px; background: var(--surface2); border: 1px solid var(--border); border-radius: 20px; padding: 5px 12px; font-size: .72em; font-weight: 600; color: var(--text-muted); cursor: pointer; transition: all .15s; user-select: none; }
+    .pill.active { border-color: var(--accent); color: var(--accent); background: rgba(108,99,255,.08); }
+    .pill:hover:not(.active) { border-color: var(--border-glow); color: var(--text); }
+
+    .quick { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; width: 100%; max-width: 620px; animation: fadeIn .5s ease .18s both; }
+    .qlink { display: flex; align-items: center; gap: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; cursor: pointer; transition: all .15s; }
+    .qlink:hover { border-color: var(--border-glow); background: var(--surface2); transform: translateY(-2px); }
+    .qlink:active { transform: none; }
+    .qi { width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+    .qn { font-size: .8em; font-weight: 700; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .qu { font-size: .65em; color: var(--text-muted); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    @keyframes fadeIn { from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none} }
+    @media(max-width:600px) { #dl-btn span{display:none} .logo-text{display:none} }
+  </style>
+</head>
+<body>
+<div id="app">
+
+  <div id="topbar">
+    <div id="loader"></div>
+    <div class="logo" id="home-btn" title="Home">
+      <div class="logo-mark">🌐</div>
+      <div class="logo-text">Ultra<span>Proxy</span></div>
+    </div>
+    <div class="nav-btn" id="btn-back"    title="Back">&#8592;</div>
+    <div class="nav-btn" id="btn-forward" title="Forward">&#8594;</div>
+    <div class="nav-btn" id="btn-reload"  title="Reload">&#8635;</div>
+    <div id="urlbar-wrap">
+      <span class="urlbar-icon" id="lock-icon">🔒</span>
+      <input id="urlbar" type="text" placeholder="Search or enter a URL…" autocomplete="off" spellcheck="false">
+      <button id="go-btn">Go</button>
+    </div>
+    <a href="/download" id="dl-btn" download="ultraproxy.zip" title="Download & Rehost">
+      ⬇ <span>Download &amp; Rehost</span>
+    </a>
+  </div>
+
+  <div id="content">
+    <div id="home">
+      <div class="hero">
+        <div class="hero-badge">✦ Full-Fidelity Proxying</div>
+        <div class="hero-title">The Web,<br>Proxied Right.</div>
+        <p class="hero-sub">Server-side proxy — CSS, images, JS, canvas, backgrounds preserved.</p>
+      </div>
+
+      <div class="notice">
+        ⚠️ <strong>Google &amp; Reddit block datacenter IPs</strong> — Codespaces runs on Azure which is permanently flagged.
+        Sign-in through Google OAuth also fails for the same reason. Use <strong>DuckDuckGo</strong> or <strong>Brave</strong> for search.
+        <strong>YouTube</strong> uses a dedicated API, so search &amp; video playback work without proxying the site itself.
+      </div>
+
+      <div class="search-area">
+        <div class="search-form">
+          <span class="si-icon">🔍</span>
+          <input id="search-input" type="text" placeholder="Search or paste a URL…" autocomplete="off" spellcheck="false">
+          <button class="search-btn" id="search-btn">Browse →</button>
+        </div>
+        <div class="pills">
+          <span class="pill active" data-engine="ddg">🦆 DuckDuckGo</span>
+          <span class="pill"        data-engine="google">🔵 Google</span>
+          <span class="pill"        data-engine="brave">🦁 Brave</span>
+          <span class="pill"        data-engine="bing">⬜ Bing</span>
+          <span class="pill"        data-engine="youtube">▶️ YouTube</span>
+        </div>
+      </div>
+
+      <div class="quick">
+        <div class="qlink" data-url="ddg">
+          <div class="qi" style="background:rgba(255,107,157,.15)">🦆</div>
+          <div><div class="qn">DuckDuckGo</div><div class="qu">duckduckgo.com</div></div>
+        </div>
+        <div class="qlink" data-url="google">
+          <div class="qi" style="background:rgba(66,133,244,.15)">🔵</div>
+          <div><div class="qn">Google</div><div class="qu">google.com</div></div>
+        </div>
+        <div class="qlink" data-url="wiki">
+          <div class="qi" style="background:rgba(255,255,255,.08)">📖</div>
+          <div><div class="qn">Wikipedia</div><div class="qu">wikipedia.org</div></div>
+        </div>
+        <div class="qlink" data-url="reddit">
+          <div class="qi" style="background:rgba(255,69,0,.15)">🔴</div>
+          <div><div class="qn">Reddit</div><div class="qu">reddit.com</div></div>
+        </div>
+        <div class="qlink" data-url="github">
+          <div class="qi" style="background:rgba(255,255,255,.08)">🐙</div>
+          <div><div class="qn">GitHub</div><div class="qu">github.com</div></div>
+        </div>
+        <div class="qlink" data-url="youtube">
+          <div class="qi" style="background:rgba(255,0,0,.15)">▶️</div>
+          <div><div class="qn">YouTube</div><div class="qu">API search</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!--
+      Sandbox notes:
+      - allow-same-origin : cookies / localStorage work → sign-in possible
+      - allow-scripts     : JavaScript
+      - allow-forms       : form submit
+      - allow-popups      : popups (our injection routes them back in-frame)
+      - allow-modals      : alert/confirm
+      - allow-downloads   : file downloads
+      NO allow-top-navigation  : injected page can't hijack parent window
+      NO allow-popups-to-escape-sandbox : window.open can't escape
+    -->
+    <iframe
+      id="proxy-frame"
+      sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"
+      referrerpolicy="no-referrer-when-downgrade"
+    ></iframe>
+  </div>
+
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  let engine     = 'ddg';
+  let isProxying = false;
+  let loadTimer  = null;
+  // Track last YouTube search so ytBack() can return to it
+  let lastYtSearch = '';
+  let lastTargetUrl = '';
+
+  const frame    = document.getElementById('proxy-frame');
+  const homeDiv  = document.getElementById('home');
+  const urlbar   = document.getElementById('urlbar');
+  const loader   = document.getElementById('loader');
+  const lockIcon = document.getElementById('lock-icon');
+
+  // ── Loader ─────────────────────────────────────────────────────────
+  function startLoad() {
+    loader.className = 'loading';
+    clearTimeout(loadTimer);
+    loadTimer = setTimeout(stopLoad, 25000);
+  }
+  function stopLoad() {
+    clearTimeout(loadTimer);
+    loader.className = 'done';
+    setTimeout(() => { loader.className = ''; }, 600);
+  }
+
+  // ── Utilities ───────────────────────────────────────────────────────
+  function looksLikeUrl(s) {
+    s = s.trim();
+    return /^https?:\/\//i.test(s) ||
+           /^[a-z0-9]+([\-.][a-z0-9]+)*\.[a-z]{2,}(\/.*)?$/i.test(s);
+  }
+
+  function encodeProxyToken(raw) {
+    const bytes = new TextEncoder().encode(raw);
+    let bin = '';
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+
+  function engineUrl(q) {
+    const enc = encodeURIComponent(q.trim());
+    switch (engine) {
+      case 'google':  return { url: 'https://www.google.com/search?q=' + enc, direct: true };
+      case 'brave':   return { url: 'https://search.brave.com/search?q=' + enc, direct: true };
+      case 'bing':    return { url: 'https://www.bing.com/search?q=' + enc, direct: true };
+      case 'youtube': return { url: '/yt-search?q=' + enc, direct: false };
+      default:        return { url: 'https://duckduckgo.com/?q=' + enc, direct: true };
+    }
+  }
+
+  // ── Navigate to a proxied URL ───────────────────────────────────────
+  function navigateTo(url) {
+    if (!url) return;
+    if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+    startLoad();
+    isProxying = true;
+    homeDiv.classList.add('hidden');
+    frame.classList.add('visible');
+    frame.src = '/proxy/' + encodeProxyToken(url);
+    lastTargetUrl = url;
+    urlbar.value = url;
+    lockIcon.textContent = url.startsWith('https') ? '🔒' : '🔓';
+  }
+  window.navigateTo = navigateTo; // exposed for YT watch/search pages
+
+  // ── Load a local route (e.g. /yt-search) ───────────────────────────
+  function loadLocal(url) {
+    startLoad();
+    isProxying = true;
+    homeDiv.classList.add('hidden');
+    frame.classList.add('visible');
+    frame.src = url;
+    if (url.startsWith('/yt-search')) {
+      const q = new URLSearchParams(url.split('?')[1] || '').get('q') || '';
+      urlbar.value = q ? '▶️ YouTube: ' + q : '▶️ YouTube Search';
+      lastYtSearch = url;
+    } else {
+      urlbar.value = url;
+    }
+    lastTargetUrl = '';
+    lockIcon.textContent = '🔒';
+  }
+
+  // ── Go home ─────────────────────────────────────────────────────────
+  function goHome() {
+    isProxying = false;
+    frame.classList.remove('visible');
+    frame.src = 'about:blank';
+    homeDiv.classList.remove('hidden');
+    urlbar.value = '';
+    lastTargetUrl = '';
+    stopLoad();
+  }
+  window.goHome = goHome;
+
+  // ── YouTube helpers exposed to the iframe pages ─────────────────────
+  // Called from YT search results: onclick="window.top.navigateTo(...)"
+  // Called from YT watch: onclick="window.top.ytBack()"
+  window.ytSearch = function(q) {
+    if (!q || !q.trim()) return;
+    loadLocal('/yt-search?q=' + encodeURIComponent(q.trim()));
+  };
+  window.ytBack = function() {
+    if (lastYtSearch) { loadLocal(lastYtSearch); }
+    else              { loadLocal('/yt-search'); }
+  };
+
+  // ── Input parsing ───────────────────────────────────────────────────
+  function parseInput(raw) {
+    raw = raw.trim();
+    if (!raw) return null;
+    if (engine === 'youtube') {
+      return { url: '/yt-search?q=' + encodeURIComponent(raw), direct: false };
+    }
+    if (looksLikeUrl(raw)) {
+      if (!/^https?:\/\//i.test(raw)) raw = 'https://' + raw;
+      return { url: raw, direct: true };
+    }
+    return engineUrl(raw);
+  }
+
+  // ── URL bar ─────────────────────────────────────────────────────────
+  function handleGo() {
+    const raw = urlbar.value.trim();
+    if (!raw) return;
+    const r = parseInput(raw);
+    if (!r) return;
+    if (r.direct) navigateTo(r.url);
+    else loadLocal(r.url);
+  }
+  urlbar.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); handleGo(); } });
+  document.getElementById('go-btn').addEventListener('click', handleGo);
+  urlbar.addEventListener('focus', () => urlbar.select());
+
+  // ── Home search ─────────────────────────────────────────────────────
+  const si = document.getElementById('search-input');
+  function handleSearch() {
+    const raw = si.value.trim();
+    if (!raw) return;
+    const r = parseInput(raw);
+    if (!r) return;
+    if (r.direct) navigateTo(r.url);
+    else loadLocal(r.url);
+  }
+  si.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); handleSearch(); } });
+  document.getElementById('search-btn').addEventListener('click', handleSearch);
+
+  // ── Engine pills ────────────────────────────────────────────────────
+  document.querySelectorAll('.pill').forEach(p => {
+    p.addEventListener('click', () => {
+      engine = p.dataset.engine;
+      document.querySelectorAll('.pill').forEach(x => x.classList.remove('active'));
+      p.classList.add('active');
+    });
+  });
+
+  // ── Quick links ─────────────────────────────────────────────────────
+  const qlMap = {
+    ddg     : () => navigateTo('https://duckduckgo.com'),
+    google  : () => navigateTo('https://www.google.com'),
+    wiki    : () => navigateTo('https://www.wikipedia.org'),
+    reddit  : () => navigateTo('https://www.reddit.com'),
+    github  : () => navigateTo('https://github.com'),
+    youtube : () => loadLocal('/yt-search'),
+  };
+  document.querySelectorAll('.qlink').forEach(el => {
+    el.addEventListener('click', () => {
+      const fn = qlMap[el.dataset.url];
+      if (fn) fn();
+    });
+  });
+
+  // ── Nav buttons ─────────────────────────────────────────────────────
+  document.getElementById('home-btn').addEventListener('click', goHome);
+
+  document.getElementById('btn-back').addEventListener('click', () => {
+    if (isProxying) { try { frame.contentWindow.history.back(); } catch {} }
+  });
+  document.getElementById('btn-forward').addEventListener('click', () => {
+    if (isProxying) { try { frame.contentWindow.history.forward(); } catch {} }
+  });
+  document.getElementById('btn-reload').addEventListener('click', () => {
+    if (!isProxying || !frame.src || frame.src === 'about:blank') return;
+    startLoad();
+    const saved = frame.src;
+    frame.src = 'about:blank';
+    setTimeout(() => { frame.src = saved; }, 50);
+  });
+
+  // ── Frame events ────────────────────────────────────────────────────
+  frame.addEventListener('load', () => {
+    stopLoad();
+    if (!isProxying) return;
+    try {
+      const src = frame.contentWindow.location.href;
+      if (!src || src === 'about:blank') return;
+      if (src.includes('/yt-search') || src.includes('/yt-watch')) {
+        // Already handled by loadLocal
+        return;
+      }
+      // Block iframe escape: if the frame navigated to a non-proxied URL
+      const path = frame.contentWindow.location.pathname || '';
+      if (path && !path.startsWith('/proxy/') && !path.startsWith('/yt-')) {
+        frame.srcdoc = '<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0;font-family:system-ui,sans-serif;text-align:center"><div><h1 style="font-size:1.6rem;margin-bottom:.5rem">⚠️ Unsafe redirect blocked</h1><p style="color:#aaa">The page tried to navigate outside the proxy.</p></div></div></body></html>';
+        return;
+      }
+      if (lastTargetUrl) {
+        urlbar.value = lastTargetUrl;
+        lockIcon.textContent = lastTargetUrl.startsWith('https') ? '🔒' : '🔓';
+      }
+    } catch {}
+  });
+
+  window.addEventListener('message', e => {
+    if (!e.data || e.data.type !== 'proxyNav') return;
+    const url = e.data.url || '';
+    if (!url || url === 'about:blank') return;
+    if (url.includes('/yt-search') || url.includes('/yt-watch')) return;
+    if (lastTargetUrl) {
+      urlbar.value = lastTargetUrl;
+      lockIcon.textContent = lastTargetUrl.startsWith('https') ? '🔒' : '🔓';
+    }
+  });
+
+  // ── Init ───────────────────────────────────────────────────────────
+  setTimeout(() => si.focus(), 80);
+
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+import Text from './misc/Text.js';
+import { YTNode } from '../helpers.js';
+class MusicResponsiveListItemFlexColumn extends YTNode {
+    constructor(data) {
+        super();
+        this.title = new Text(data.text);
+        this.display_priority = data.displayPriority;
+    }
+}
+MusicResponsiveListItemFlexColumn.type = 'MusicResponsiveListItemFlexColumn';
+export default MusicResponsiveListItemFlexColumn;

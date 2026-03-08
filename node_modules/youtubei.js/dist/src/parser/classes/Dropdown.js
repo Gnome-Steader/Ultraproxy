@@ -1,0 +1,12 @@
+import { YTNode } from '../helpers.js';
+import { Parser } from '../index.js';
+import DropdownItem from './DropdownItem.js';
+class Dropdown extends YTNode {
+    constructor(data) {
+        super();
+        this.label = data.label || '';
+        this.entries = Parser.parseArray(data.entries, DropdownItem);
+    }
+}
+Dropdown.type = 'Dropdown';
+export default Dropdown;
