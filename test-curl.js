@@ -1,0 +1,1 @@
+const axios = require("axios"); axios.get("http://localhost:3000/proxy/aHR0cHM6Ly90aHNzYW5kYm94LmNvbS9hcHBzL2dub21lc3RlZGVyL2Nvb2wtc3R1ZmYvaG9zdG5hbWUuaHRtbA").then(r => console.log(r.data.match(/updateInfo\[\^\\n\]+/g) || r.data.substring(r.data.indexOf("updateInfo"), r.data.indexOf("updateInfo") + 200)));

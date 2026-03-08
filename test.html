@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<body>
+<script>
+// Paste the user script here to see if it throws!
+(function(){
+'use strict';
+var ORIGIN   = "https://thssandbox.com";
+var HOSTNAME = "thssandbox.com";
+var PROTOCOL = "https:";
+var PORT     = "";
+var TURL     = "https://thssandbox.com/apps/gnomesteder/cool-stuff/hostname.html";
+var PFX      = '/proxy/';
+var LORG     = location.origin;
+try {
+  var _lp = Object.getPrototypeOf((window.__pxLoc||window.location));
+  var _rawHref = Object.getOwnPropertyDescriptor(_lp, 'href');
+  function getRealHref() { return _rawHref.get.call(location); }
+  var _currentTargetUrl = TURL || (ORIGIN + '/');
+  function getProxiedUrl() { return _currentTargetUrl; }
+  function getProxiedParsed() { return new URL(getProxiedUrl()); }
+
+  window.__pxLoc = {
+    get href() { var p = getProxiedParsed(); return p ? p.href : (ORIGIN + '/'); },
+    get hostname() { var p = getProxiedParsed(); return p ? p.hostname : HOSTNAME; },
+    get origin() { return ORIGIN; }
+  };
+} catch(e) {
+  console.log("Error in try block: ", e);
+}
+console.log("PX Loc is ", window.__pxLoc);
+console.log("hostname is ", window.__pxLoc.hostname);
+})();
+</script>
+</body>
+</html>

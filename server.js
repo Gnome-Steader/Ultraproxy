@@ -131,6 +131,17 @@ function rewriteCSS(css, base) {
   return css;
 }
 
+// ─── JS Rewriter ──────────────────────────────────────────────────────────────
+function rewriteJS(js) {
+  if (!js || typeof js !== 'string') return js;
+  try {
+    js = js.replace(/window\.location/g, '(window.__pxLoc||window.location)');
+    js = js.replace(/document\.location/g, '(window.__pxLoc||document.location)');
+    js = js.replace(/([^a-zA-Z0-9_.]|^)location\.(href|hostname|host|origin|protocol|port|pathname|search|hash|assign|replace|reload)\b/g, '$1(window.__pxLoc||location).$2');
+    return js;
+  } catch { return js; }
+}
+
 function rewriteSrcset(srcset, base) {
   if (!srcset) return srcset;
   const entries = [];
@@ -160,13 +171,14 @@ function rewriteSrcset(srcset, base) {
 // failure never breaks the rest of the page's JS.
 
 function buildInjectionScript(base) {
-  let origin = '', hostname = '', protocol = 'https:', port = '';
+  let origin = '', hostname = '', protocol = 'https:', port = '', fullUrl = '';
   try {
     const u = new URL(base);
     origin   = u.origin;
     hostname = u.hostname;
     protocol = u.protocol;
     port     = u.port;
+    fullUrl  = u.href;
   } catch {}
 
   return `<script>
@@ -178,6 +190,7 @@ var ORIGIN   = ${JSON.stringify(origin)};
 var HOSTNAME = ${JSON.stringify(hostname)};
 var PROTOCOL = ${JSON.stringify(protocol)};
 var PORT     = ${JSON.stringify(port)};
+var TURL     = ${JSON.stringify(fullUrl)};
 var PFX      = '/proxy/';
 var LORG     = location.origin;
 
@@ -252,33 +265,68 @@ try {
   defProp(window, 'parent',       { get: function() { return window; } });
   defProp(window, 'self',         { get: function() { return window; } });
   defProp(window, 'frameElement', { get: function() { return null; } });
+  defProp(window, 'origin',       { get: function() { return ORIGIN; } });
 } catch(e) {}
 
 // ── 2. location spoof ────────────────────────────────────────────────────────
-try {
-  var _lp = Object.getPrototypeOf(window.location);
+  var _lp = null;
+  try { _lp = Object.getPrototypeOf(window.location); } catch(e) {}
 
   // Helper to get the real raw href
-  var _rawHref = Object.getOwnPropertyDescriptor(_lp, 'href');
+  var _rawHref = null;
+  if (_lp) {
+    try { _rawHref = Object.getOwnPropertyDescriptor(_lp, 'href'); } catch(e) {}
+  }
 
   function getRealHref() {
-    try { return _rawHref.get.call(location); } catch(e) { return ''; }
+    if (_rawHref && _rawHref.get) {
+      try { return _rawHref.get.call(location); } catch(e) {}
+    }
+    return location.href;
   }
 
   // Extract the proxied original URL from the real href
+  // Track current proxied URL; starts with server-injected value, updated by SPA nav
+  var _currentTargetUrl = TURL || (ORIGIN + '/');
+
   function getProxiedUrl() {
     var real = getRealHref();
-    if (real.indexOf(LORG + PFX) === 0) {
+    if (real && real.indexOf(LORG + PFX) === 0) {
       var rest = real.slice((LORG + PFX).length);
-      if (rest) return rest;
+      // Only use the extracted rest if it's a parseable absolute URL
+      if (rest && /^https?:\\/\\//.test(rest)) return rest;
     }
-    return ORIGIN + '/';
+    // Fallback: use server-injected target URL (handles base64-token routes)
+    return _currentTargetUrl;
   }
 
   function getProxiedParsed() {
     try { return new URL(getProxiedUrl()); } catch(e) { return null; }
   }
 
+  // Inject a complete spoofed location object for the JS rewriter
+  window.__pxLoc = {
+    get href() { var p = getProxiedParsed(); return p ? p.href : (ORIGIN + '/'); },
+    set href(v) { try { v = px(String(v)); } catch(e) {} if(_rawHref && _rawHref.set) { _rawHref.set.call(location, v); } else { location.href = v; } },
+    get hostname() { var p = getProxiedParsed(); return p ? p.hostname : HOSTNAME; },
+    get host() { var p = getProxiedParsed(); return p ? p.host : (HOSTNAME + (PORT ? ':' + PORT : '')); },
+    get origin() { var p = getProxiedParsed(); return p ? p.origin : ORIGIN; },
+    get protocol() { var p = getProxiedParsed(); return p ? p.protocol : PROTOCOL; },
+    get port() { var p = getProxiedParsed(); return p ? p.port : PORT; },
+    get pathname() { var p = getProxiedParsed(); return p ? p.pathname : '/'; },
+    set pathname(v) { try { if(_rawHref && _rawHref.set) { _rawHref.set.call(location, px(ORIGIN + v)); } else { location.pathname = px(ORIGIN + v); } } catch(e) {} },
+    get search() { var p = getProxiedParsed(); return p ? p.search : ''; },
+    set search(v) { try { var p = getProxiedParsed() || new URL(ORIGIN + '/'); p.search = v; if(_rawHref && _rawHref.set) { _rawHref.set.call(location, px(p.href)); } else { location.search = v; } } catch(e) {} },
+    get hash() { return window.location.hash; },
+    set hash(v) { window.location.hash = v; },
+    assign: function(v) { try { v = px(String(v)); } catch(e) {} window.location.assign(v); },
+    replace: function(v) { try { v = px(String(v)); } catch(e) {} window.location.replace(v); },
+    reload: function(f) { window.location.reload(f); },
+    toString: function() { return this.href; },
+    valueOf: function() { return this.href; }
+  };
+
+try {
   // href
   if (_rawHref && _rawHref.get && _rawHref.set) {
     defProp(_lp, 'href', {
@@ -369,22 +417,18 @@ try {
     defProp(document, 'domain', { get: function() { return HOSTNAME; }, set: function() {} });
   } catch(e) {}
 
-  // document.URL / documentURI
+  // document.URL / documentURI — use the full spoofed href
   try {
     var urlGetter = function() {
-      try {
-        var p = new URL(location.pathname.indexOf(PFX) === 0 ? location.pathname.slice(PFX.length) : ORIGIN + '/');
-        p.search = location.search;
-        return p.href;
-      } catch(e) { return ORIGIN + '/'; }
+      try { return location.href; } catch(e) { return _currentTargetUrl; }
     };
     defProp(document, 'URL',         { get: urlGetter });
     defProp(document, 'documentURI', { get: urlGetter });
   } catch(e) {}
 
-  // document.baseURI
+  // document.baseURI — use full target URL so relative resolution works
   try {
-    defProp(document, 'baseURI', { get: function() { return ORIGIN + '/'; } });
+    defProp(document, 'baseURI', { get: function() { return _currentTargetUrl; } });
   } catch(e) {}
 
   // document.referrer
@@ -420,11 +464,14 @@ try {
   history.pushState = function(s, t, u) {
     if (u != null) { try { u = px(String(u)); } catch(e) {} }
     _push(s, t, u);
+    // Update tracked target URL after SPA navigation
+    try { var nu = getProxiedUrl(); if (/^https?:\\/\\//.test(nu)) _currentTargetUrl = nu; } catch(e) {}
     setTimeout(notifyParent, 0);
   };
   history.replaceState = function(s, t, u) {
     if (u != null) { try { u = px(String(u)); } catch(e) {} }
     _rep(s, t, u);
+    try { var nu = getProxiedUrl(); if (/^https?:\\/\\//.test(nu)) _currentTargetUrl = nu; } catch(e) {}
     setTimeout(notifyParent, 0);
   };
   window.addEventListener('popstate', notifyParent);
@@ -579,6 +626,117 @@ try {
   };
 } catch(e) {}
 
+// ── 13b. Anchor / Area element URL-property de-proxying ──────────────────────
+try {
+  ['HTMLAnchorElement', 'HTMLAreaElement'].forEach(function(cls) {
+    var proto = window[cls] && window[cls].prototype;
+    if (!proto) return;
+    var _hd = Object.getOwnPropertyDescriptor(proto, 'href');
+    if (!_hd || !_hd.get) return;
+
+    function deproxy(el) {
+      var raw;
+      try { raw = _hd.get.call(el); } catch(e) { return null; }
+      if (!raw) return null;
+      var pfx = LORG + PFX;
+      if (raw.indexOf(pfx) === 0) {
+        var rest = raw.slice(pfx.length);
+        if (/^https?:\\/\\//.test(rest)) {
+          try { return new URL(rest); } catch(e) {}
+        }
+      }
+      return null;
+    }
+
+    defProp(proto, 'href', {
+      get: function() { var p = deproxy(this); return p ? p.href : _hd.get.call(this); },
+      set: function(v) { try { v = px(String(v)); } catch(e) {} _hd.set.call(this, v); }
+    });
+
+    ['hostname','host','origin','protocol','port','pathname','search','hash'].forEach(function(prop) {
+      var _d = Object.getOwnPropertyDescriptor(proto, prop);
+      if (!_d || !_d.get) return;
+      defProp(proto, prop, {
+        get: function() { var p = deproxy(this); return p ? p[prop] : _d.get.call(this); },
+        set: _d.set ? function(v) { _d.set.call(this, v); } : undefined
+      });
+    });
+
+    try { proto.toString = function() { return this.href; }; } catch(e) {}
+  });
+} catch(e) {}
+
+// ── 13c. Performance API navigation entry spoofing ───────────────────────────
+try {
+  function rewriteEntryName(name) {
+    if (!name || typeof name !== 'string') return name;
+    var pfx = LORG + PFX;
+    if (name.indexOf(pfx) === 0) {
+      var rest = name.slice(pfx.length);
+      if (/^https?:\\/\\//.test(rest)) return rest;
+    }
+    if (name.indexOf(LORG) === 0) {
+      return ORIGIN + name.slice(LORG.length);
+    }
+    return name;
+  }
+  if (window.PerformanceEntry) {
+    var _nameDesc = Object.getOwnPropertyDescriptor(PerformanceEntry.prototype, 'name');
+    if (_nameDesc && _nameDesc.get) {
+      defProp(PerformanceEntry.prototype, 'name', {
+        get: function() { return rewriteEntryName(_nameDesc.get.call(this)); }
+      });
+    }
+  }
+  if (window.PerformanceNavigationTiming) {
+    var _nDesc = Object.getOwnPropertyDescriptor(PerformanceNavigationTiming.prototype, 'name');
+    if (_nDesc && _nDesc.get) {
+      defProp(PerformanceNavigationTiming.prototype, 'name', {
+        get: function() { return rewriteEntryName(_nDesc.get.call(this)); }
+      });
+    }
+  }
+} catch(e) {}
+
+// ── 13d. Blob URL origin masking ─────────────────────────────────────────────
+try {
+  var _createObjectURL = URL.createObjectURL;
+  if (_createObjectURL) {
+    URL.createObjectURL = function(obj) {
+      var blobUrl = _createObjectURL.call(URL, obj);
+      // blob:https://proxy-host/uuid → replace origin portion is not reliable,
+      // but we can at least hide it from .origin checks on the blob URL string.
+      return blobUrl;
+    };
+  }
+  // Spoof URL.origin for blob: URLs containing the proxy host
+  var _urlOriginDesc = Object.getOwnPropertyDescriptor(URL.prototype, 'origin');
+  if (_urlOriginDesc && _urlOriginDesc.get) {
+    defProp(URL.prototype, 'origin', {
+      get: function() {
+        var o = _urlOriginDesc.get.call(this);
+        if (o === LORG) return ORIGIN;
+        return o;
+      }
+    });
+  }
+} catch(e) {}
+
+// ── 13e. postMessage origin spoofing ─────────────────────────────────────────
+try {
+  var _origAEL = EventTarget.prototype.addEventListener;
+  var _msgOriginDesc = Object.getOwnPropertyDescriptor(MessageEvent.prototype, 'origin');
+  if (_msgOriginDesc && _msgOriginDesc.get) {
+    defProp(MessageEvent.prototype, 'origin', {
+      get: function() {
+        var o = _msgOriginDesc.get.call(this);
+        if (o === LORG) return ORIGIN;
+        return o;
+      }
+    });
+  }
+} catch(e) {}
+
 // ── 14. Click interceptor ─────────────────────────────────────────────────────
 try {
   document.addEventListener('click', function(e) {
@@ -659,6 +817,31 @@ try {
   });
 } catch(e) {}
 
+// ── 17. Error.stack rewriting — prevent proxy URL leak in stack traces ────────
+try {
+  function rewriteStack(stack) {
+    if (!stack || typeof stack !== 'string') return stack;
+    // Replace LORG + /proxy/https:// → https://
+    var pfxFull = LORG + PFX;
+    var idx;
+    while ((idx = stack.indexOf(pfxFull)) !== -1) {
+      stack = stack.substring(0, idx) + stack.substring(idx + pfxFull.length);
+    }
+    // Replace any remaining proxy origin with target origin
+    while ((idx = stack.indexOf(LORG)) !== -1) {
+      stack = stack.substring(0, idx) + ORIGIN + stack.substring(idx + LORG.length);
+    }
+    return stack;
+  }
+  var _errStackDesc = Object.getOwnPropertyDescriptor(Error.prototype, 'stack');
+  if (_errStackDesc && _errStackDesc.get) {
+    defProp(Error.prototype, 'stack', {
+      get: function() { return rewriteStack(_errStackDesc.get.call(this)); },
+      set: _errStackDesc.set
+    });
+  }
+} catch(e) {}
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
 notifyParent();
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', notifyParent);
@@ -723,7 +906,18 @@ function rewriteHTML(html, targetUrl) {
     ['srcset','data-srcset'].forEach(a=>{const v=$(el).attr(a);if(v)$(el).attr(a,rewriteSrcset(v,base));});
   });
 
-  $('script[src]').each((_,el)  => rw(el,'src'));
+  $('script').each((_,el) => {
+    if ($(el).attr('src')) {
+      rw(el,'src');
+    } else {
+      const c = $(el).html();
+      if (c) {
+        const rc = rewriteJS(c);
+        if (rc !== c) $(el).html(rc);
+      }
+    }
+  });
+
   $('link[href]').each((_,el)   => rw(el,'href'));
 
   $('form').each((_,el) => {
@@ -786,7 +980,8 @@ function buildHeaders(targetUrl, req, isYT) {
     'Accept'             : accept || (isNav ? 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7' : '*/*'),
     'Accept-Language'    : 'en-US,en;q=0.9',
     'Accept-Encoding'    : 'gzip, deflate, br',
-    'Host'               : p.hostname,
+    'Host'               : p.host,
+    'Origin'             : p.origin,
     'Referer'            : referer,
     'sec-ch-ua'          : '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
     'sec-ch-ua-mobile'   : '?0',
@@ -953,6 +1148,12 @@ async function proxyRequest(targetUrl, req, res) {
       const css = rewriteCSS(buf.toString('utf-8'), targetUrl);
       res.setHeader('Content-Type', 'text/css; charset=utf-8');
       return res.status(resp.status).send(css);
+    } catch { return res.status(resp.status).send(buf); }
+  }
+  if (ct.includes('javascript') || ct.includes('ecmascript')) {
+    try {
+      const js = rewriteJS(buf.toString('utf-8'));
+      return res.status(resp.status).send(js);
     } catch { return res.status(resp.status).send(buf); }
   }
   return res.status(resp.status).send(buf);
@@ -1234,6 +1435,13 @@ app.get('/proxy/:token', async (req, res) => {
         const css = rewriteCSS(buf.toString('utf-8'), finalUrl);
         res.setHeader('Content-Type', 'text/css; charset=utf-8');
         return res.send(css);
+      } catch { return res.send(buf); }
+    }
+    if (ct.includes('javascript') || ct.includes('ecmascript')) {
+      try {
+        const js = rewriteJS(buf.toString('utf-8'));
+        // Allow original content type to pass through, just rewrite the body
+        return res.send(js);
       } catch { return res.send(buf); }
     }
     res.setHeader('Content-Type', ct);
