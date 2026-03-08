@@ -242,7 +242,7 @@ function pxCss(v) {
 function notifyParent() {
   try {
     if (_realParent !== window)
-      _realParent.postMessage({ type: 'proxyNav', url: LORG + location.pathname + location.search }, '*');
+      _realParent.postMessage({ type: 'proxyNav' }, '*');
   } catch(e) {}
 }
 

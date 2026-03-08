@@ -134,7 +134,7 @@
       <div class="hero">
         <div class="hero-badge">✦ Full-Fidelity Proxying</div>
         <div class="hero-title">The Web,<br>Proxied Right.</div>
-        <p class="hero-sub">Server-side proxy — CSS, images, JS, canvas, backgrounds preserved.</p>
+        <p class="hero-sub">Server-side proxy with comprehensive JS spoofing — CSS, images, JS, canvas preserved.</p>
       </div>
 
       <div class="notice">
@@ -186,17 +186,6 @@
       </div>
     </div>
 
-    <!--
-      Sandbox notes:
-      - allow-same-origin : cookies / localStorage work → sign-in possible
-      - allow-scripts     : JavaScript
-      - allow-forms       : form submit
-      - allow-popups      : popups (our injection routes them back in-frame)
-      - allow-modals      : alert/confirm
-      - allow-downloads   : file downloads
-      NO allow-top-navigation  : injected page can't hijack parent window
-      NO allow-popups-to-escape-sandbox : window.open can't escape
-    -->
     <iframe
       id="proxy-frame"
       sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads"
@@ -213,9 +202,10 @@
   let engine     = 'ddg';
   let isProxying = false;
   let loadTimer  = null;
-  // Track last YouTube search so ytBack() can return to it
-  let lastYtSearch = '';
+  let lastYtSearch  = '';
   let lastTargetUrl = '';
+  // Saved frame src for reload — frame.src can change due to SPA nav
+  let lastFrameSrc  = '';
 
   const frame    = document.getElementById('proxy-frame');
   const homeDiv  = document.getElementById('home');
@@ -249,6 +239,25 @@
     return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
   }
 
+  // Extract the real target URL from a /proxy/... path
+  function extractProxiedUrl(proxyPath) {
+    if (!proxyPath) return null;
+    // Direct URL format: /proxy/https://example.com/...
+    const directMatch = proxyPath.match(/^\/proxy\/(https?:\/\/.+)/);
+    if (directMatch) return directMatch[1];
+    // Token format: /proxy/<base64token>
+    const tokenMatch = proxyPath.match(/^\/proxy\/([A-Za-z0-9_\-]+)$/);
+    if (tokenMatch) {
+      try {
+        const normalized = tokenMatch[1].replace(/-/g, '+').replace(/_/g, '/');
+        const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+        const decoded = atob(padded);
+        if (/^https?:\/\//i.test(decoded)) return decoded;
+      } catch {}
+    }
+    return null;
+  }
+
   function engineUrl(q) {
     const enc = encodeURIComponent(q.trim());
     switch (engine) {
@@ -260,20 +269,47 @@
     }
   }
 
-  // ── Navigate to a proxied URL ───────────────────────────────────────
-  function navigateTo(url) {
+  function updateUrlBar(url) {
     if (!url) return;
-    if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-    startLoad();
-    isProxying = true;
-    homeDiv.classList.add('hidden');
-    frame.classList.add('visible');
-    frame.src = '/proxy/' + encodeProxyToken(url);
     lastTargetUrl = url;
     urlbar.value = url;
     lockIcon.textContent = url.startsWith('https') ? '🔒' : '🔓';
   }
-  window.navigateTo = navigateTo; // exposed for YT watch/search pages
+
+  // ── Navigate to a proxied URL ───────────────────────────────────────
+  // Intercepts youtube.com watch URLs and routes them to our YT API
+  function navigateTo(url) {
+    if (!url) return;
+    if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+
+    // Intercept YouTube.com watch URLs → use our API player instead
+    try {
+      const parsed = new URL(url);
+      if (/^(www\.)?youtube\.com$/i.test(parsed.hostname)) {
+        const v = parsed.searchParams.get('v');
+        if (parsed.pathname === '/watch' && v) {
+          loadLocal('/yt-watch?v=' + encodeURIComponent(v));
+          return;
+        }
+        // YouTube homepage or other YT pages → use our search
+        if (parsed.pathname === '/' || parsed.pathname === '/results') {
+          const q = parsed.searchParams.get('search_query') || '';
+          loadLocal('/yt-search' + (q ? '?q=' + encodeURIComponent(q) : ''));
+          return;
+        }
+      }
+    } catch {}
+
+    startLoad();
+    isProxying = true;
+    homeDiv.classList.add('hidden');
+    frame.classList.add('visible');
+    const src = '/proxy/' + encodeProxyToken(url);
+    frame.src = src;
+    lastFrameSrc = src;
+    updateUrlBar(url);
+  }
+  window.navigateTo = navigateTo;
 
   // ── Load a local route (e.g. /yt-search) ───────────────────────────
   function loadLocal(url) {
@@ -282,10 +318,13 @@
     homeDiv.classList.add('hidden');
     frame.classList.add('visible');
     frame.src = url;
+    lastFrameSrc = url;
     if (url.startsWith('/yt-search')) {
       const q = new URLSearchParams(url.split('?')[1] || '').get('q') || '';
       urlbar.value = q ? '▶️ YouTube: ' + q : '▶️ YouTube Search';
       lastYtSearch = url;
+    } else if (url.startsWith('/yt-watch')) {
+      urlbar.value = '▶️ YouTube Video';
     } else {
       urlbar.value = url;
     }
@@ -301,20 +340,19 @@
     homeDiv.classList.remove('hidden');
     urlbar.value = '';
     lastTargetUrl = '';
+    lastFrameSrc = '';
     stopLoad();
   }
   window.goHome = goHome;
 
   // ── YouTube helpers exposed to the iframe pages ─────────────────────
-  // Called from YT search results: onclick="window.top.navigateTo(...)"
-  // Called from YT watch: onclick="window.top.ytBack()"
   window.ytSearch = function(q) {
     if (!q || !q.trim()) return;
     loadLocal('/yt-search?q=' + encodeURIComponent(q.trim()));
   };
   window.ytBack = function() {
-    if (lastYtSearch) { loadLocal(lastYtSearch); }
-    else              { loadLocal('/yt-search'); }
+    if (lastYtSearch) loadLocal(lastYtSearch);
+    else              loadLocal('/yt-search');
   };
 
   // ── Input parsing ───────────────────────────────────────────────────
@@ -392,46 +430,103 @@
     if (isProxying) { try { frame.contentWindow.history.forward(); } catch {} }
   });
   document.getElementById('btn-reload').addEventListener('click', () => {
-    if (!isProxying || !frame.src || frame.src === 'about:blank') return;
+    if (!isProxying || !lastFrameSrc) return;
     startLoad();
-    const saved = frame.src;
     frame.src = 'about:blank';
-    setTimeout(() => { frame.src = saved; }, 50);
+    setTimeout(() => { frame.src = lastFrameSrc; }, 50);
   });
+
+  // Build the "unsafe redirect blocked" page with Retry and Home buttons
+  function buildBlockedPage(blockedPath) {
+    const escapedPath = String(blockedPath || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return `<html><head><style>
+      *{margin:0;padding:0;box-sizing:border-box}
+      body{display:flex;align-items:center;justify-content:center;height:100vh;background:#0d0d14;color:#e0e0e0;font-family:system-ui,sans-serif}
+      .card{background:#1a1a2e;border:1px solid #2a2a4a;border-radius:16px;padding:2.5em;max-width:480px;width:90%;text-align:center}
+      h1{font-size:1.4rem;margin-bottom:.6rem;color:#ff6b6b}
+      p{color:#aaa;font-size:.9em;line-height:1.6;margin-bottom:1.2em}
+      .path{font-family:monospace;font-size:.78em;background:#0f0f1e;border:1px solid #1f1f3a;border-radius:6px;padding:6px 10px;margin:.6em 0;color:#7070a0;word-break:break-all}
+      .btns{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+      button{padding:10px 22px;border:none;border-radius:10px;font-size:.88em;font-weight:600;cursor:pointer;transition:opacity .15s}
+      .retry{background:linear-gradient(135deg,#6c63ff,#00d4ff);color:#fff}
+      .home{background:#1f1f3a;color:#e0e0e0;border:1px solid #2a2a4a}
+      button:hover{opacity:.82}
+    </style></head><body>
+    <div class="card">
+      <h1>&#9888;&#65039; Redirect Blocked</h1>
+      <p>The page tried to navigate outside the proxy to a non-proxied URL.</p>
+      <div class="path">${escapedPath}</div>
+      <div class="btns">
+        <button class="retry" onclick="window.top.postMessage({type:'retryNav'},'*')">&#8635; Retry</button>
+        <button class="home" onclick="window.top.goHome()">&#127968; Home</button>
+      </div>
+    </div></body></html>`;
+  }
 
   // ── Frame events ────────────────────────────────────────────────────
   frame.addEventListener('load', () => {
     stopLoad();
     if (!isProxying) return;
     try {
-      const src = frame.contentWindow.location.href;
-      if (!src || src === 'about:blank') return;
-      if (src.includes('/yt-search') || src.includes('/yt-watch')) {
-        // Already handled by loadLocal
-        return;
-      }
-      // Block iframe escape: if the frame navigated to a non-proxied URL
+      const href = frame.contentWindow.location.href;
+      if (!href || href === 'about:blank') return;
       const path = frame.contentWindow.location.pathname || '';
+
+      // YT pages are local, handled by loadLocal
+      if (path.startsWith('/yt-search') || path.startsWith('/yt-watch')) return;
+
+      // Detect frame escape: navigated to a non-proxied path on our server
       if (path && !path.startsWith('/proxy/') && !path.startsWith('/yt-')) {
-        frame.srcdoc = '<html><body style="display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0;font-family:system-ui,sans-serif;text-align:center"><div><h1 style="font-size:1.6rem;margin-bottom:.5rem">⚠️ Unsafe redirect blocked</h1><p style="color:#aaa">The page tried to navigate outside the proxy.</p></div></div></body></html>';
+        frame.srcdoc = buildBlockedPage(path);
         return;
       }
-      if (lastTargetUrl) {
-        urlbar.value = lastTargetUrl;
-        lockIcon.textContent = lastTargetUrl.startsWith('https') ? '🔒' : '🔓';
+
+      // Try to extract real URL from the frame's actual path for URL bar
+      const realUrl = extractProxiedUrl(path + frame.contentWindow.location.search);
+      if (realUrl) {
+        updateUrlBar(realUrl);
+        lastFrameSrc = frame.contentWindow.location.pathname + frame.contentWindow.location.search;
+      } else if (lastTargetUrl) {
+        updateUrlBar(lastTargetUrl);
       }
-    } catch {}
+    } catch {
+      // Cross-origin — injection spoofing is active; fall back to lastTargetUrl
+      if (lastTargetUrl) updateUrlBar(lastTargetUrl);
+    }
   });
 
+  // Handle proxyNav messages from the injection script (SPA navigation updates)
   window.addEventListener('message', e => {
-    if (!e.data || e.data.type !== 'proxyNav') return;
+    if (!e.data) return;
+
+    // Retry button from the blocked page
+    if (e.data.type === 'retryNav') {
+      if (lastFrameSrc) {
+        startLoad();
+        frame.src = lastFrameSrc;
+      }
+      return;
+    }
+
+    if (e.data.type !== 'proxyNav') return;
     const url = e.data.url || '';
     if (!url || url === 'about:blank') return;
     if (url.includes('/yt-search') || url.includes('/yt-watch')) return;
-    if (lastTargetUrl) {
-      urlbar.value = lastTargetUrl;
-      lockIcon.textContent = lastTargetUrl.startsWith('https') ? '🔒' : '🔓';
-    }
+
+    // The injection script sends LORG + spoofed pathname + spoofed search.
+    // Try to read the frame's real pathname to extract the actual proxied URL.
+    try {
+      const realPath = frame.contentWindow.location.pathname + frame.contentWindow.location.search;
+      const realUrl = extractProxiedUrl(realPath);
+      if (realUrl) {
+        updateUrlBar(realUrl);
+        lastFrameSrc = realPath;
+        return;
+      }
+    } catch {}
+
+    // Fallback: use lastTargetUrl
+    if (lastTargetUrl) updateUrlBar(lastTargetUrl);
   });
 
   // ── Init ───────────────────────────────────────────────────────────
