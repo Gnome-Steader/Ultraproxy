@@ -203,6 +203,40 @@ function defProp(obj, prop, descriptor) {
   try { Object.defineProperty(obj, prop, Object.assign({ configurable: true }, descriptor)); } catch(e) {}
 }
 
+// ── 0. Native-function toString cloaking ─────────────────────────────────────
+// Sites call fn.toString() to see if it returns '[native code]'. If not,
+// they know the function was monkey-patched → proxy detected → freeze/hang.
+var _origToString = Function.prototype.toString;
+var _nativeMap = new WeakMap();
+function markNative(fn, name) {
+  if (typeof fn === 'function' && name) _nativeMap.set(fn, name);
+  return fn;
+}
+try {
+  Function.prototype.toString = function() {
+    var n = _nativeMap.get(this);
+    if (n) return 'function ' + n + '() { [native code] }';
+    return _origToString.call(this);
+  };
+  _nativeMap.set(Function.prototype.toString, 'toString');
+} catch(e) {}
+
+// ── 0b. Object.getOwnPropertyDescriptor masking ─────────────────────────────
+// Sites inspect descriptors to check if getters look native. We hide ours.
+var _origGOPD = Object.getOwnPropertyDescriptor;
+var _maskedDescs = new WeakMap();
+function maskDesc(obj, prop, fakeDesc) {
+  if (!_maskedDescs.has(obj)) _maskedDescs.set(obj, new Map());
+  _maskedDescs.get(obj).set(prop, fakeDesc);
+}
+try {
+  Object.getOwnPropertyDescriptor = markNative(function getOwnPropertyDescriptor(obj, prop) {
+    var m = _maskedDescs.get(obj);
+    if (m && m.has(prop)) return m.get(prop);
+    return _origGOPD.call(Object, obj, prop);
+  }, 'getOwnPropertyDescriptor');
+} catch(e) {}
+
 // Core URL rewriter
 function px(url) {
   if (!url || typeof url !== 'string') return url;
@@ -259,6 +293,22 @@ function notifyParent() {
   } catch(e) {}
 }
 
+// Rewrite any existing inline styles (pre-mutation observer)
+function rewriteExistingStyles() {
+  try {
+    var els = document.querySelectorAll('[style]');
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      var s = el.getAttribute('style');
+      if (s) {
+        var r = rewriteCSS(s, document.location.href);
+        if (r !== s) el.setAttribute('style', r);
+      }
+    }
+  } catch(e) {}
+}
+rewriteExistingStyles();
+
 // ── 1. window.top / parent / self / frameElement ─────────────────────────────
 try {
   defProp(window, 'top',          { get: function() { return window; } });
@@ -266,6 +316,11 @@ try {
   defProp(window, 'self',         { get: function() { return window; } });
   defProp(window, 'frameElement', { get: function() { return null; } });
   defProp(window, 'origin',       { get: function() { return ORIGIN; } });
+  // Mask descriptors so they look like native accessors to introspection
+  var _nativeUndef = { set: undefined, enumerable: true, configurable: true };
+  try { maskDesc(window, 'top',    Object.assign({ get: _origGOPD.call(Object, Window.prototype, 'top')?.get }, _nativeUndef)); } catch(e) {}
+  try { maskDesc(window, 'parent', Object.assign({ get: _origGOPD.call(Object, Window.prototype, 'parent')?.get }, _nativeUndef)); } catch(e) {}
+  try { maskDesc(window, 'origin', Object.assign({ get: _origGOPD.call(Object, Window.prototype, 'origin')?.get }, _nativeUndef)); } catch(e) {}
 } catch(e) {}
 
 // ── 2. location spoof ────────────────────────────────────────────────────────
@@ -503,21 +558,21 @@ try {
 // ── 7. window.open → stay in frame ───────────────────────────────────────────
 try {
   var _wo = window.open;
-  window.open = function(url, target, features) {
+  window.open = markNative(function open(url, target, features) {
     if (url && url !== 'about:blank') {
       try { url = px(String(url)); } catch(e) {}
       location.href = url;
       return window;
     }
     return _wo ? _wo.call(window, url, target, features) : null;
-  };
+  }, 'open');
 } catch(e) {}
 
 // ── 8. fetch ─────────────────────────────────────────────────────────────────
 try {
   if (window.fetch) {
     var _f = window.fetch;
-    window.fetch = function(input, init) {
+    window.fetch = markNative(function fetch(input, init) {
       try {
         if (typeof input === 'string') input = px(input);
         else if (input instanceof Request) {
@@ -526,23 +581,23 @@ try {
         }
       } catch(e) {}
       return _f.call(this, input, init);
-    };
+    }, 'fetch');
   }
 } catch(e) {}
 
 // ── 9. XMLHttpRequest ─────────────────────────────────────────────────────────
 try {
   var _X = window.XMLHttpRequest;
-  function PXR() {
+  var PXR = markNative(function XMLHttpRequest() {
     var x = new _X(), _o = x.open;
-    x.open = function(m, url) {
+    x.open = markNative(function open(m, url) {
       try { url = px(String(url)); } catch(e) {}
       var a = Array.prototype.slice.call(arguments);
       a[1] = url;
       return _o.apply(x, a);
-    };
+    }, 'open');
     return x;
-  }
+  }, 'XMLHttpRequest');
   PXR.UNSENT = 0; PXR.OPENED = 1; PXR.HEADERS_RECEIVED = 2;
   PXR.LOADING = 3; PXR.DONE = 4;
   PXR.prototype = _X.prototype;
@@ -550,21 +605,42 @@ try {
 } catch(e) {}
 
 // ── 10. WebSocket ─────────────────────────────────────────────────────────────
-// Route WS through proxy path so the server can relay; or at minimum rewrite URLs
+// Let WebSocket connections pass directly to real game servers. Make wrapper invisible.
 try {
   var _WS = window.WebSocket;
   if (_WS) {
-    window.WebSocket = function(url, protocols) {
-      // Convert ws://example.com/... → wss://example.com/...
-      // We can't easily proxy WS, but we can convert ws → wss same host
-      // For now just pass through — at least prevent "wrong hostname" log spam
+    var PxWebSocket = markNative(function WebSocket(url, protocols) {
+      if (!(this instanceof PxWebSocket)) {
+        return protocols ? new _WS(url, protocols) : new _WS(url);
+      }
       return protocols ? new _WS(url, protocols) : new _WS(url);
-    };
-    window.WebSocket.prototype = _WS.prototype;
-    window.WebSocket.CONNECTING = _WS.CONNECTING;
-    window.WebSocket.OPEN = _WS.OPEN;
-    window.WebSocket.CLOSING = _WS.CLOSING;
-    window.WebSocket.CLOSED = _WS.CLOSED;
+    }, 'WebSocket');
+    PxWebSocket.prototype = _WS.prototype;
+    PxWebSocket.CONNECTING = _WS.CONNECTING;
+    PxWebSocket.OPEN = _WS.OPEN;
+    PxWebSocket.CLOSING = _WS.CLOSING;
+    PxWebSocket.CLOSED = _WS.CLOSED;
+    window.WebSocket = PxWebSocket;
+    maskDesc(window, 'WebSocket', { value: PxWebSocket, writable: true, enumerable: false, configurable: true });
+  }
+} catch(e) {}
+
+// ── 10b. WebRTC — block IP leak ──────────────────────────────────────────────
+try {
+  if (window.RTCPeerConnection) {
+    var _RTC = window.RTCPeerConnection;
+    var PxRTC = markNative(function RTCPeerConnection(config, constraints) {
+      // Force relay-only ICE to prevent real-IP STUN leak
+      config = config || {};
+      config.iceTransportPolicy = 'relay';
+      if (!config.iceServers) config.iceServers = [];
+      return new _RTC(config, constraints);
+    }, 'RTCPeerConnection');
+    PxRTC.prototype = _RTC.prototype;
+    PxRTC.generateCertificate = _RTC.generateCertificate;
+    window.RTCPeerConnection = PxRTC;
+    if (window.webkitRTCPeerConnection) window.webkitRTCPeerConnection = PxRTC;
+    maskDesc(window, 'RTCPeerConnection', { value: PxRTC, writable: true, enumerable: false, configurable: true });
   }
 } catch(e) {}
 
@@ -619,11 +695,11 @@ try {
 // ── 13. createElement img → add crossorigin ──────────────────────────────────
 try {
   var _ce = document.createElement.bind(document);
-  document.createElement = function(tag) {
+  document.createElement = markNative(function createElement(tag) {
     var el = _ce.apply(document, arguments);
     if (typeof tag === 'string' && tag.toLowerCase() === 'img') el.crossOrigin = 'anonymous';
     return el;
-  };
+  }, 'createElement');
 } catch(e) {}
 
 // ── 13b. Anchor / Area element URL-property de-proxying ──────────────────────
@@ -746,16 +822,12 @@ try {
     var href = el.href;
     if (!href || href.indexOf('javascript:') === 0 || href.charAt(0) === '#') return;
     if (href.indexOf(LORG + PFX) === 0) return; // already correct
-    if (href.indexOf(LORG) === 0) {
-      e.preventDefault(); e.stopPropagation();
-      var rel = href.slice(LORG.length) || '/';
-      location.href = rel.indexOf(PFX) === 0 ? rel : PFX + ORIGIN + rel;
-      return;
-    }
-    if (el.getAttribute('target') === '_blank' || el.getAttribute('target') === '_top') {
-      e.preventDefault(); e.stopPropagation();
-      location.href = px(href);
-      return;
+    e.preventDefault(); e.stopPropagation();
+    var p = px(href);
+    if (el.getAttribute('target') === '_blank') {
+      window.open(p, '_blank');
+    } else {
+      location.href = p;
     }
   }, true);
 } catch(e) {}
@@ -767,9 +839,9 @@ try {
     if (!f || f.tagName !== 'FORM') return;
     var act = f.action || '';
     if (!act) return;
-    if (act.indexOf(LORG) === 0 && act.indexOf(LORG + PFX) !== 0) {
-      var rel = act.slice(LORG.length) || '/';
-      f.action = rel.indexOf(PFX) === 0 ? rel : PFX + ORIGIN + rel;
+    var proxied = px(act);
+    if (act !== proxied) {
+      f.action = proxied;
     }
   }, true);
 } catch(e) {}
@@ -782,11 +854,17 @@ try {
       if (m.type === 'attributes') {
         var el = m.target;
         var an = m.attributeName;
-        if (an === 'src' || an === 'href' || an === 'action' || an === 'data') {
+        if (an === 'src' || an === 'href' || an === 'action' || an === 'data' || an === 'style') {
           var v = el.getAttribute(an);
-          if (v && v.indexOf(LORG) === 0 && v.indexOf(LORG + PFX) !== 0) {
-            var rel = v.slice(LORG.length) || '/';
-            el.setAttribute(an, rel.indexOf(PFX) === 0 ? rel : PFX + ORIGIN + rel);
+          if (v) {
+            if (an === 'style') {
+              // rewrite any url(...) inside style string
+              var r = rewriteCSS(v, document.location.href);
+              if (r !== v) el.setAttribute('style', r);
+            } else if (v.indexOf(LORG) === 0 && v.indexOf(LORG + PFX) !== 0) {
+              var rel = v.slice(LORG.length) || '/';
+              el.setAttribute(an, rel.indexOf(PFX) === 0 ? rel : PFX + ORIGIN + rel);
+            }
           }
         }
       }
@@ -812,9 +890,49 @@ try {
     }
   });
   _mo.observe(document.documentElement || document, {
-    attributes: true, attributeFilter: ['src','href','action','data'],
+    attributes: true, attributeFilter: ['src','href','action','data','style'],
     childList: true, subtree: true
   });
+} catch(e) {}
+
+// ── 16b. iframe location sync — keep iframe.src up-to-date with document URL
+try {
+  // inside a nested iframe notify parent of URL changes
+  if (window.parent && window.parent !== window) {
+    var _lastHref = window.location.href;
+    function _pxNotifyParent() {
+      try { window.parent.postMessage({type:'px-iframe-loc', url:_lastHref}, '*'); } catch(e) {}
+    }
+    window.addEventListener('load', function(){
+      _lastHref = window.location.href;
+      _pxNotifyParent();
+    });
+    setInterval(function(){
+      try {
+        var h = window.location.href;
+        if (h !== _lastHref) {
+          _lastHref = h;
+          _pxNotifyParent();
+        }
+      } catch(e) {}
+    }, 300);
+  }
+  // parent frame listens for updates and rewrites its iframe.src attribute
+  window.addEventListener('message', function(e){
+    if (e.data && e.data.type === 'px-iframe-loc' && typeof e.data.url === 'string') {
+      var iframes = document.getElementsByTagName('iframe');
+      for (var i = 0; i < iframes.length; i++) {
+        var f = iframes[i];
+        try {
+          if (f.contentWindow === e.source) {
+            var newsrc = px(e.data.url);
+            if (newsrc && f.src !== newsrc) f.src = newsrc;
+            break;
+          }
+        } catch(err) {}
+      }
+    }
+  }, false);
 } catch(e) {}
 
 // ── 17. Error.stack rewriting — prevent proxy URL leak in stack traces ────────
@@ -839,6 +957,74 @@ try {
       get: function() { return rewriteStack(_errStackDesc.get.call(this)); },
       set: _errStackDesc.set
     });
+  }
+} catch(e) {}
+
+// ── 18. Anti-detection: mark history/location methods as native ──────────────
+try {
+  markNative(history.pushState, 'pushState');
+  markNative(history.replaceState, 'replaceState');
+  markNative(location.assign, 'assign');
+  markNative(location.replace, 'replace');
+  if (location.reload) markNative(location.reload, 'reload');
+} catch(e) {}
+
+// ── 19. document.currentScript.src de-proxying ──────────────────────────────
+try {
+  var _csDesc = _origGOPD.call(Object, Document.prototype, 'currentScript');
+  if (_csDesc && _csDesc.get) {
+    defProp(Document.prototype, 'currentScript', {
+      get: function() {
+        var cs = _csDesc.get.call(this);
+        if (!cs) return cs;
+        if (cs._pxPatched) return cs;
+        try {
+          var _srcDesc = _origGOPD.call(Object, HTMLScriptElement.prototype, 'src');
+          if (_srcDesc && _srcDesc.get) {
+            var _origSrcGet = _srcDesc.get;
+            Object.defineProperty(cs, 'src', {
+              get: function() {
+                var s = _origSrcGet.call(this);
+                if (s && s.indexOf(LORG + PFX) === 0) {
+                  var rest = s.slice((LORG + PFX).length);
+                  if (/^https?:\\/\\//.test(rest)) return rest;
+                }
+                return s;
+              },
+              configurable: true
+            });
+          }
+          cs._pxPatched = true;
+        } catch(e) {}
+        return cs;
+      }
+    });
+  }
+} catch(e) {}
+
+// ── 20. Notification/Permission API spoofing ────────────────────────────────
+try {
+  if (window.Notification) {
+    defProp(Notification, 'permission', { get: function() { return 'default'; } });
+    Notification.requestPermission = markNative(function requestPermission() {
+      return Promise.resolve('default');
+    }, 'requestPermission');
+  }
+} catch(e) {}
+
+// ── 21. SharedArrayBuffer / crossOriginIsolated concealment ─────────────────
+try {
+  defProp(window, 'crossOriginIsolated', { get: function() { return false; } });
+} catch(e) {}
+
+// ── 22. navigator.sendBeacon — proxy URLs ───────────────────────────────────
+try {
+  if (navigator.sendBeacon) {
+    var _sb = navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon = markNative(function sendBeacon(url, data) {
+      try { url = px(String(url)); } catch(e) {}
+      return _sb(url, data);
+    }, 'sendBeacon');
   }
 } catch(e) {}
 
