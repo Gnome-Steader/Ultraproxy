@@ -135,34 +135,83 @@ function rewriteCSS(css, base) {
 function rewriteJS(js) {
   if (!js || typeof js !== 'string') return js;
   try {
-    js = js.replace(/window\.location/g, '(window.__pxLoc||window.location)');
-    js = js.replace(/document\.location/g, '(window.__pxLoc||document.location)');
-    js = js.replace(/([^a-zA-Z0-9_.]|^)location\.(href|hostname|host|origin|protocol|port|pathname|search|hash|assign|replace|reload)\b/g, '$1(window.__pxLoc||location).$2');
+    // AST edits avoid changing strings, comments, and regex literals.
+    const acorn = require('acorn');
+    let ast;
+    const options = { ecmaVersion: 'latest', allowAwaitOutsideFunction: true,
+      allowReturnOutsideFunction: true, allowImportExportEverywhere: true };
+    try { ast = acorn.parse(js, { ...options, sourceType: 'module' }); }
+    catch { ast = acorn.parse(js, { ...options, sourceType: 'script' }); }
+    const patches = [];
+    const locationProperties = new Set(['href','hostname','host','origin','protocol','port','pathname','search','hash','assign','replace','reload']);
+    const propertyName = node => {
+      if (!node) return null;
+      if (!node.computed && node.property && node.property.type === 'Identifier') return node.property.name;
+      if (node.computed && node.property && node.property.type === 'Literal' && typeof node.property.value === 'string') return node.property.value;
+      return null;
+    };
+    const visit = node => {
+      if (!node || typeof node !== 'object') return;
+      if (node.type === 'MemberExpression') {
+        const prop = propertyName(node);
+        if (prop === 'location' && node.object && node.object.type === 'Identifier' &&
+            (node.object.name === 'window' || node.object.name === 'document')) {
+          const root = node.object.name;
+          patches.push({ start: node.start, end: node.end, value: root === 'window'
+            ? '(window.__pxLoc||window.location)' : '(window.__pxLoc||document.location)' });
+        } else if (locationProperties.has(prop) && node.object &&
+                   node.object.type === 'Identifier' && node.object.name === 'location') {
+          patches.push({ start: node.object.start, end: node.object.end, value: '(window.__pxLoc||location)' });
+        }
+      }
+      for (const key of Object.keys(node)) {
+        if (key === 'start' || key === 'end' || key === 'loc' || key === 'range') continue;
+        const value = node[key];
+        if (Array.isArray(value)) value.forEach(visit);
+        else if (value && typeof value === 'object') visit(value);
+      }
+    };
+    visit(ast);
+    patches.sort((a, b) => b.start - a.start || b.end - a.end);
+    let lastStart = Infinity;
+    for (const patch of patches) {
+      if (patch.end > lastStart) continue;
+      js = js.slice(0, patch.start) + patch.value + js.slice(patch.end);
+      lastStart = patch.start;
+    }
     return js;
-  } catch { return js; }
+  } catch {
+    // Unsupported syntax is left untouched rather than corrupted.
+    return js;
+  }
 }
 
 function rewriteSrcset(srcset, base) {
   if (!srcset) return srcset;
-  const entries = [];
-  let buf = '', inData = false;
-  for (let i = 0; i < srcset.length; i++) {
-    const ch = srcset[i];
-    if (!inData && buf.trimStart().startsWith('data:')) inData = true;
-    if (ch === ',' && !inData) { entries.push(buf); buf = ''; inData = false; }
-    else buf += ch;
+  const candidates = [];
+  let pos = 0;
+  while (pos < srcset.length) {
+    while (pos < srcset.length && (/[\s,]/.test(srcset[pos]))) pos++;
+    if (pos >= srcset.length) break;
+    let url = '';
+    while (pos < srcset.length && !/\s/.test(srcset[pos])) url += srcset[pos++];
+    let trailingCommas = 0;
+    while (url.endsWith(',')) { url = url.slice(0, -1); trailingCommas++; }
+    if (trailingCommas) { if (url) candidates.push({ url, descriptor: '' }); continue; }
+    while (pos < srcset.length && /\s/.test(srcset[pos])) pos++;
+    let descriptor = '';
+    while (pos < srcset.length && srcset[pos] !== ',') descriptor += srcset[pos++];
+    if (pos < srcset.length && srcset[pos] === ',') pos++;
+    candidates.push({ url, descriptor: descriptor.trim() });
   }
-  if (buf) entries.push(buf);
-  return entries.map(entry => {
-    entry = entry.trim();
-    if (!entry || entry.startsWith('data:')) return entry;
-    const match = entry.match(/^(\S+)(\s+.+)?$/);
-    if (!match) return entry;
-    const [, u, d] = match;
-    if (u.startsWith('data:')) return entry;
-    const r = resolveUrl(base, u);
-    return (r && isAbsoluteUrl(r)) ? toProxyPath(r) + (d || '') : entry;
-  }).join(', ');
+  return candidates.map(({ url, descriptor }) => {
+    if (!url) return '';
+    if (!/^data:/i.test(url)) {
+      const resolved = resolveUrl(base, url);
+      if (resolved && isAbsoluteUrl(resolved)) url = toProxyPath(resolved);
+    }
+    return url + (descriptor ? ' ' + descriptor : '');
+  }).filter(Boolean).join(', ');
 }
 
 // ─── Injection Script ─────────────────────────────────────────────────────────
@@ -171,15 +220,21 @@ function rewriteSrcset(srcset, base) {
 // failure never breaks the rest of the page's JS.
 
 // New edits
-function buildInjectionScript(base) {
+function buildInjectionScript(documentUrl, resourceBase) {
   let origin = '', hostname = '', protocol = 'https:', port = '', fullUrl = '';
   try {
-    const u = new URL(base);
+    const u = new URL(documentUrl);
     origin   = u.origin;
     hostname = u.hostname;
     protocol = u.protocol;
     port     = u.port;
     fullUrl  = u.href;
+  } catch {}
+  let effectiveResourceBase = '';
+  try {
+    const normalizedDocumentUrl = new URL(documentUrl).href;
+    const normalizedResourceBase = new URL(resourceBase || documentUrl).href;
+    if (normalizedResourceBase !== normalizedDocumentUrl) effectiveResourceBase = normalizedResourceBase;
   } catch {}
 
   return `<script>
@@ -192,6 +247,7 @@ var HOSTNAME = ${JSON.stringify(hostname)};
 var PROTOCOL = ${JSON.stringify(protocol)};
 var PORT     = ${JSON.stringify(port)};
 var TURL     = ${JSON.stringify(fullUrl)};
+var RESOURCE_BASE = ${JSON.stringify(effectiveResourceBase)};
 var PFX      = '/proxy/';
 var LORG     = location.origin;
 
@@ -257,14 +313,10 @@ function px(url) {
     else if (t.indexOf('//') === 0)     { abs = 'https:' + t; }
     else if (t.charAt(0) === '/')       { abs = ORIGIN + t; }
     else {
-      var cur = location.pathname + location.search;
-      if (cur.indexOf(PFX) === 0) {
-        try { abs = new URL(t, cur.slice(PFX.length)).href; }
-        catch(e) { abs = ORIGIN + '/' + t; }
-      } else {
-        try { abs = new URL(t, location.href).href; }
-        catch(e) { abs = ORIGIN + '/' + t; }
-      }
+      try {
+        // Preserve effective <base href> resolution after removing the base element.
+        abs = new URL(t, RESOURCE_BASE || getProxiedUrl()).href;
+      } catch(e) { abs = ORIGIN + '/' + t; }
     }
     if (abs.indexOf(LORG + PFX) === 0) return abs.slice(LORG.length);
     if (abs.indexOf(LORG) === 0) {
@@ -273,6 +325,28 @@ function px(url) {
     }
     return PFX + abs;
   } catch(e) { return url; }
+}
+
+// Rewrite srcset candidates without splitting commas embedded in data URLs.
+function pxSrcset(value) {
+  if (!value || typeof value !== 'string') return value;
+  var out = [];
+  var pos = 0;
+  while (pos < value.length) {
+    while (pos < value.length && (/[\s,]/.test(value.charAt(pos)))) pos++;
+    if (pos >= value.length) break;
+    var url = '';
+    while (pos < value.length && !/\s/.test(value.charAt(pos))) url += value.charAt(pos++);
+    var trailing = 0;
+    while (url.charAt(url.length - 1) === ',') { url = url.slice(0, -1); trailing++; }
+    if (trailing) { if (url) out.push(px(url)); continue; }
+    while (pos < value.length && /\s/.test(value.charAt(pos))) pos++;
+    var descriptor = '';
+    while (pos < value.length && value.charAt(pos) !== ',') descriptor += value.charAt(pos++);
+    if (pos < value.length && value.charAt(pos) === ',') pos++;
+    if (url) out.push(px(url) + (descriptor.trim() ? ' ' + descriptor.trim() : ''));
+  }
+  return out.join(', ');
 }
 
 // CSS url() rewriter
@@ -302,7 +376,7 @@ function rewriteExistingStyles() {
       var el = els[i];
       var s = el.getAttribute('style');
       if (s) {
-        var r = rewriteCSS(s, document.location.href);
+        var r = pxCss(s);
         if (r !== s) el.setAttribute('style', r);
       }
     }
@@ -1141,16 +1215,20 @@ try {
       if (m.type === 'attributes') {
         var el = m.target;
         var an = m.attributeName;
-        if (an === 'src' || an === 'href' || an === 'action' || an === 'data' || an === 'style') {
+        if (an === 'src' || an === 'href' || an === 'action' || an === 'formaction' ||
+            an === 'data' || an === 'poster' || an === 'cite' || an === 'xlink:href' ||
+            an === 'srcset' || an === 'data-srcset' || an === 'style') {
           var v = el.getAttribute(an);
           if (v) {
             if (an === 'style') {
-              // rewrite any url(...) inside style string
-              var r = rewriteCSS(v, document.location.href);
-              if (r !== v) el.setAttribute('style', r);
-            } else if (v.indexOf(LORG) === 0 && v.indexOf(LORG + PFX) !== 0) {
-              var rel = v.slice(LORG.length) || '/';
-              el.setAttribute(an, rel.indexOf(PFX) === 0 ? rel : PFX + ORIGIN + rel);
+              var rewrittenStyle = pxCss(v);
+              if (rewrittenStyle !== v) el.setAttribute('style', rewrittenStyle);
+            } else if (an === 'srcset' || an === 'data-srcset') {
+              var rewrittenSrcset = pxSrcset(v);
+              if (rewrittenSrcset !== v) el.setAttribute(an, rewrittenSrcset);
+            } else {
+              var rewrittenUrl = px(v);
+              if (rewrittenUrl && rewrittenUrl !== v) el.setAttribute(an, rewrittenUrl);
             }
           }
         }
@@ -1177,7 +1255,7 @@ try {
     }
   });
   _mo.observe(document.documentElement || document, {
-    attributes: true, attributeFilter: ['src','href','action','data','style'],
+    attributes: true, attributeFilter: ['src','href','action','formaction','data','poster','cite','xlink:href','srcset','data-srcset','style'],
     childList: true, subtree: true
   });
 } catch(e) {}
@@ -1362,7 +1440,7 @@ function rewriteHTML(html, targetUrl) {
     $(el).remove();
   });
 
-  const injection = buildInjectionScript(base);
+  const injection = buildInjectionScript(targetUrl, base);
   if ($('head').length) $('head').prepend(injection);
   else if ($('body').length) $('body').prepend(injection);
   else $('html').prepend(injection);
