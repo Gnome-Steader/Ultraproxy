@@ -2266,7 +2266,7 @@ app.get('/proxy/:token', async (req, res) => {
     }
     if (ct.includes('javascript') || ct.includes('ecmascript')) {
       try {
-        const js = rewriteJS(buf.toString('utf-8'));
+        const js = rewriteJS(buf.toString('utf-8'), finalUrl);
         // Allow original content type to pass through, just rewrite the body
         return res.send(js);
       } catch { return res.send(buf); }
