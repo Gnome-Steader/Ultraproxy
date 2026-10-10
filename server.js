@@ -14,9 +14,13 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 
 // ── SOCKS5 Proxy ──────────────────────────────────────────────────────────────
-const proxyUrl = 'socks5://mevyuxgz:45mlsshm4lr6@216.10.27.159:6837';
+// Configure the optional upstream SOCKS5 proxy with SOCKS_PROXY_URL.
+// Never commit proxy credentials to source control.
+const proxyUrl = process.env.SOCKS_PROXY_URL || '';
 const enableStickyGoogleProxy = process.env.ENABLE_STICKY_GOOGLE_PROXY === '1';
-console.log('🔒 SOCKS5 Proxy configured: 216.10.27.159:6837');
+console.log(proxyUrl
+  ? 'SOCKS5 upstream proxy configured.'
+  : 'SOCKS_PROXY_URL is not set; upstream requests will use the direct connection.');
 
 const proxyAgentCache = new Map();
 
@@ -42,10 +46,11 @@ function getRequestProxyAgent(targetUrl, req) {
   let resolvedProxyUrl = proxyUrl;
   try {
     const host = new URL(targetUrl).hostname;
-    if (enableStickyGoogleProxy && isGoogleHost(host)) {
+    if (proxyUrl && enableStickyGoogleProxy && isGoogleHost(host)) {
       resolvedProxyUrl = buildStickyGoogleProxyUrl(proxyUrl, req);
     }
   } catch {}
+  if (!resolvedProxyUrl) return undefined;
   if (!proxyAgentCache.has(resolvedProxyUrl)) {
     proxyAgentCache.set(resolvedProxyUrl, new SocksProxyAgent(resolvedProxyUrl, { rejectUnauthorized: false }));
   }
