@@ -1038,110 +1038,191 @@ window.addEventListener('load', notifyParent);
 }
 
 // ─── HTML Rewriter ────────────────────────────────────────────────────────────
+// New edits
 function rewriteHTML(html, targetUrl) {
   let base = targetUrl;
   try { base = new URL(targetUrl).href; } catch {}
 
   const $ = cheerio.load(html, { decodeEntities: false });
 
-  // Remove ALL security/policy meta tags
-  ['Content-Security-Policy','content-security-policy',
-   'X-Frame-Options','x-frame-options',
-   'X-Content-Type-Options','Referrer-Policy','referrer-policy',
-   'Cross-Origin-Opener-Policy','Cross-Origin-Embedder-Policy',
-   'Cross-Origin-Resource-Policy',
-  ].forEach(n => {
-    $(`meta[http-equiv="${n}"]`).remove();
-    $(`meta[http-equiv="${n.toLowerCase()}"]`).remove();
+  const removedMetaValues = new Set([
+    'content-security-policy', 'x-frame-options', 'x-content-type-options',
+    'referrer-policy', 'cross-origin-opener-policy',
+    'cross-origin-embedder-policy', 'cross-origin-resource-policy',
+  ]);
+  $('meta[http-equiv]').each((_, el) => {
+    const value = String($(el).attr('http-equiv') || '').trim().toLowerCase();
+    if (removedMetaValues.has(value)) $(el).remove();
   });
-  $('meta[name="referrer"]').remove();
+  $('meta[name]').each((_, el) => {
+    if (String($(el).attr('name') || '').trim().toLowerCase() === 'referrer') $(el).remove();
+  });
 
-  // Absorb any <base> tag then remove it
-  $('base[href]').each((_, el) => {
-    try { base = new URL($(el).attr('href'), base).href; } catch {}
+  // Use the first valid HTTP(S) base href, then remove all base elements.
+  let baseApplied = false;
+  $('base').each((_, el) => {
+    const href = $(el).attr('href');
+    if (!baseApplied && href) {
+      try {
+        const resolved = new URL(href, base);
+        if (resolved.protocol === 'http:' || resolved.protocol === 'https:') {
+          base = resolved.href;
+          baseApplied = true;
+        }
+      } catch {}
+    }
     $(el).remove();
   });
 
-  // Inject our runtime as VERY FIRST thing in <head>
-  const inj = buildInjectionScript(base);
-  if ($('head').length)      $('head').prepend(inj);
-  else if ($('body').length) $('body').prepend(inj);
-  else                        $('html').prepend(inj);
+  const injection = buildInjectionScript(base);
+  if ($('head').length) $('head').prepend(injection);
+  else if ($('body').length) $('body').prepend(injection);
+  else $('html').prepend(injection);
 
-  const rw = (el, attr) => {
-    const v = $(el).attr(attr); if (!v) return;
-    const r = rewriteAttrValue(v, base);
-    if (r && r !== v) $(el).attr(attr, r);
+  const rewriteAttribute = (el, attr) => {
+    const value = $(el).attr(attr);
+    if (typeof value !== 'string' || !value.trim()) return;
+    const rewritten = rewriteAttrValue(value, base);
+    if (rewritten && rewritten !== value) $(el).attr(attr, rewritten);
   };
 
-  // Links
-  $('a[href]').each((_, el)   => { rw(el,'href'); $(el).removeAttr('target'); });
-  $('area[href]').each((_, el)=> { rw(el,'href'); $(el).removeAttr('target'); });
+  $('a[href], area[href]').each((_, el) => {
+    rewriteAttribute(el, 'href');
+    $(el).removeAttr('target');
+  });
+  $('link[href]').each((_, el) => rewriteAttribute(el, 'href'));
+  $('[xlink\\:href]').each((_, el) => rewriteAttribute(el, 'xlink:href'));
 
-  // Images
-  $('img').each((_, el) => {
-    ['src','data-src','data-lazy','data-lazy-src','data-original',
-     'data-img-src','data-url','data-bg','data-background','data-hi-res'].forEach(a => rw(el,a));
-    $(el).attr('crossorigin','anonymous');
-    const ss  = $(el).attr('srcset');     if (ss)  $(el).attr('srcset',    rewriteSrcset(ss, base));
-    const dss = $(el).attr('data-srcset');if (dss) $(el).attr('data-srcset',rewriteSrcset(dss,base));
+  const urlAttributes = [
+    'src', 'href', 'poster', 'data', 'cite', 'longdesc', 'manifest',
+    'background', 'profile', 'action', 'formaction',
+  ];
+  const urlElements = [
+    'img', 'picture', 'source', 'video', 'audio', 'iframe', 'frame',
+    'embed', 'object', 'track', 'input', 'button', 'form', 'blockquote',
+    'q', 'del', 'ins', 'table', 'td', 'th',
+  ];
+  urlElements.forEach(tag => {
+    $(tag).each((_, el) => {
+      urlAttributes.forEach(attr => {
+        if ($(el).attr(attr) != null) rewriteAttribute(el, attr);
+      });
+    });
   });
 
-  $('source').each((_, el) => {
-    rw(el,'src');
-    ['srcset','data-srcset'].forEach(a=>{const v=$(el).attr(a);if(v)$(el).attr(a,rewriteSrcset(v,base));});
+  const lazyAttributes = [
+    'data-src', 'data-lazy', 'data-lazy-src', 'data-original',
+    'data-img-src', 'data-url', 'data-bg', 'data-background',
+    'data-hi-res', 'data-poster', 'data-href',
+  ];
+  $('*').each((_, el) => {
+    lazyAttributes.forEach(attr => {
+      if ($(el).attr(attr) != null) rewriteAttribute(el, attr);
+    });
   });
 
-  $('script').each((_,el) => {
+  $('img, source').each((_, el) => {
+    ['srcset', 'data-srcset'].forEach(attr => {
+      const value = $(el).attr(attr);
+      if (value) $(el).attr(attr, rewriteSrcset(value, base));
+    });
+  });
+
+  $('script').each((_, el) => {
     if ($(el).attr('src')) {
-      rw(el,'src');
-    } else {
-      const c = $(el).html();
-      if (c) {
-        const rc = rewriteJS(c);
-        if (rc !== c) $(el).html(rc);
+      rewriteAttribute(el, 'src');
+      return;
+    }
+
+    const type = String($(el).attr('type') || '').trim().toLowerCase();
+    const content = $(el).html();
+    if (!content) return;
+
+    if (type === 'importmap' || type === 'application/importmap+json') {
+      try {
+        const map = JSON.parse(content);
+        const rewriteSpecifierMap = entries => {
+          if (!entries || typeof entries !== 'object' || Array.isArray(entries)) return;
+          Object.keys(entries).forEach(key => {
+            const value = entries[key];
+            if (typeof value !== 'string') return;
+            const resolved = resolveUrl(base, value);
+            if (resolved && isAbsoluteUrl(resolved)) entries[key] = toProxyPath(resolved);
+          });
+        };
+        rewriteSpecifierMap(map.imports);
+        if (map.scopes && typeof map.scopes === 'object' && !Array.isArray(map.scopes)) {
+          const scopes = {};
+          Object.keys(map.scopes).forEach(scope => {
+            const resolvedScope = resolveUrl(base, scope);
+            const rewrittenScope = resolvedScope && isAbsoluteUrl(resolvedScope)
+              ? toProxyPath(resolvedScope)
+              : scope;
+            scopes[rewrittenScope] = map.scopes[scope];
+            rewriteSpecifierMap(scopes[rewrittenScope]);
+          });
+          map.scopes = scopes;
+        }
+        $(el).text(JSON.stringify(map));
+      } catch {
+        // Leave malformed import maps untouched.
       }
+      return;
+    }
+
+    const executable = !type || type === 'module' ||
+      /^(text|application)\/(x-)?(java|ecma)script(?:\s*;|$)/.test(type) ||
+      type === 'text/babel' || type === 'text/jsx';
+    if (executable) {
+      const rewritten = rewriteJS(content);
+      if (rewritten !== content) $(el).text(rewritten);
     }
   });
 
-  $('link[href]').each((_,el)   => rw(el,'href'));
+  $('*').each((_, el) => {
+    Object.keys(el.attribs || {}).forEach(attr => {
+      if (!/^on[a-z]+$/i.test(attr)) return;
+      const original = $(el).attr(attr);
+      if (typeof original !== 'string') return;
+      const rewritten = rewriteJS(original);
+      if (rewritten !== original) $(el).attr(attr, rewritten);
+    });
+  });
 
-  $('form').each((_,el) => {
-    if ($(el).attr('action')) rw(el,'action');
-    else $(el).attr('action', toProxyPath(base));
+  $('form').each((_, el) => {
+    if (!$(el).attr('action')) $(el).attr('action', toProxyPath(base));
     $(el).removeAttr('target');
   });
-  $('input[formaction]').each((_,el)  => rw(el,'formaction'));
-  $('button[formaction]').each((_,el) => rw(el,'formaction'));
 
-  $('video').each((_,el)  => { rw(el,'src'); rw(el,'poster'); $(el).attr('crossorigin','anonymous'); });
-  $('audio').each((_,el)  => { rw(el,'src'); $(el).attr('crossorigin','anonymous'); });
-  $('iframe[src]').each((_,el)  => rw(el,'src'));
-  $('object[data]').each((_,el) => rw(el,'data'));
-  $('embed[src]').each((_,el)   => rw(el,'src'));
-  $('track[src]').each((_,el)   => rw(el,'src'));
-
-  $('[style]').each((_,el) => {
-    const s = $(el).attr('style'); if (s) { const r = rewriteCSS(s,base); if (r!==s) $(el).attr('style',r); }
+  $('[style]').each((_, el) => {
+    const value = $(el).attr('style');
+    if (!value) return;
+    const rewritten = rewriteCSS(value, base);
+    if (rewritten !== value) $(el).attr('style', rewritten);
   });
-  $('style').each((_,el) => {
-    const c = $(el).html(); if (c) { const r = rewriteCSS(c,base); if (r!==c) $(el).html(r); }
+  $('style').each((_, el) => {
+    const value = $(el).html();
+    if (!value) return;
+    const rewritten = rewriteCSS(value, base);
+    if (rewritten !== value) $(el).text(rewritten);
   });
 
-  // Inline event handlers that might contain URLs (onclick="location.href=...")
-  // These are hard to rewrite but the JS injection handles them at runtime.
-
-  $('meta[http-equiv="refresh"]').each((_,el) => {
-    const c = $(el).attr('content'); if (!c) return;
-    const u = c.replace(/url=(.+)/i, (_, u) => {
-      const r = resolveUrl(base, u.trim());
-      return (r && isAbsoluteUrl(r)) ? 'url=' + toProxyPath(r) : 'url=' + u;
+  $('meta[http-equiv]').each((_, el) => {
+    if (String($(el).attr('http-equiv') || '').trim().toLowerCase() !== 'refresh') return;
+    const content = $(el).attr('content');
+    if (!content) return;
+    const rewritten = content.replace(/(url\s*=\s*)(['"]?)([^;'"]+)\2/i, (match, prefix, quote, value) => {
+      const resolved = resolveUrl(base, value.trim());
+      return resolved && isAbsoluteUrl(resolved)
+        ? prefix + quote + toProxyPath(resolved) + quote
+        : match;
     });
-    $(el).attr('content', u);
+    if (rewritten !== content) $(el).attr('content', rewritten);
   });
 
   return $.html();
 }
+// end new edits
 
 // ─── Request Headers ──────────────────────────────────────────────────────────
 function buildHeaders(targetUrl, req, isYT) {
