@@ -143,6 +143,7 @@ function rewriteJS(js) {
     try { ast = acorn.parse(js, { ...options, sourceType: 'module' }); }
     catch { ast = acorn.parse(js, { ...options, sourceType: 'script' }); }
     const patches = [];
+    const currentParents = new WeakMap();
     const locationProperties = new Set(['href','hostname','host','origin','protocol','port','pathname','search','hash','assign','replace','reload']);
     const propertyName = node => {
       if (!node) return null;
@@ -150,15 +151,22 @@ function rewriteJS(js) {
       if (node.computed && node.property && node.property.type === 'Literal' && typeof node.property.value === 'string') return node.property.value;
       return null;
     };
-    const visit = node => {
+    const visit = (node, parent = null) => {
       if (!node || typeof node !== 'object') return;
+      if (parent) currentParents.set(node, parent);
       if (node.type === 'MemberExpression') {
         const prop = propertyName(node);
         if (prop === 'location' && node.object && node.object.type === 'Identifier' &&
             (node.object.name === 'window' || node.object.name === 'document')) {
           const root = node.object.name;
-          patches.push({ start: node.start, end: node.end, value: root === 'window'
-            ? '(window.__pxLoc||window.location)' : '(window.__pxLoc||document.location)' });
+          const parent = currentParents.get(node);
+          const isAssignmentTarget = parent && parent.type === 'AssignmentExpression' && parent.left === node;
+          patches.push({
+            start: node.start,
+            end: node.end,
+            value: isAssignmentTarget ? 'window.__pxLoc.href'
+              : (root === 'window' ? '(window.__pxLoc||window.location)' : '(window.__pxLoc||document.location)')
+          });
         } else if (locationProperties.has(prop) && node.object &&
                    node.object.type === 'Identifier' && node.object.name === 'location') {
           patches.push({ start: node.object.start, end: node.object.end, value: '(window.__pxLoc||location)' });
@@ -167,8 +175,8 @@ function rewriteJS(js) {
       for (const key of Object.keys(node)) {
         if (key === 'start' || key === 'end' || key === 'loc' || key === 'range') continue;
         const value = node[key];
-        if (Array.isArray(value)) value.forEach(visit);
-        else if (value && typeof value === 'object') visit(value);
+        if (Array.isArray(value)) value.forEach(child => visit(child, node));
+        else if (value && typeof value === 'object') visit(value, node);
       }
     };
     visit(ast);
@@ -311,7 +319,10 @@ function px(url) {
     var abs;
     if (/^https?:\\/\\//.test(t))       { abs = t; }
     else if (t.indexOf('//') === 0)     { abs = 'https:' + t; }
-    else if (t.charAt(0) === '/')       { abs = ORIGIN + t; }
+    else if (t.charAt(0) === '/')       {
+      try { abs = new URL(t, RESOURCE_BASE || getProxiedUrl()).href; }
+      catch(e) { abs = ORIGIN + t; }
+    }
     else {
       try {
         // Preserve effective <base href> resolution after removing the base element.
