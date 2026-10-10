@@ -132,7 +132,7 @@ function rewriteCSS(css, base) {
 }
 
 // ─── JS Rewriter ──────────────────────────────────────────────────────────────
-function rewriteJS(js) {
+function rewriteJS(js, baseUrl) {
   if (!js || typeof js !== 'string') return js;
   try {
     // AST edits avoid changing strings, comments, and regex literals.
@@ -144,6 +144,15 @@ function rewriteJS(js) {
     catch { ast = acorn.parse(js, { ...options, sourceType: 'script' }); }
     const patches = [];
     const currentParents = new WeakMap();
+    const rewriteModuleSpecifier = node => {
+      if (!baseUrl || !node || node.type !== 'Literal' || typeof node.value !== 'string') return;
+      const resolved = resolveUrl(baseUrl, node.value);
+      if (!resolved || !isAbsoluteUrl(resolved)) return;
+      const rewritten = toProxyPath(resolved);
+      if (rewritten !== node.value) patches.push({
+        start: node.start, end: node.end, value: JSON.stringify(rewritten),
+      });
+    };
     const locationProperties = new Set(['href','hostname','host','origin','protocol','port','pathname','search','hash','assign','replace','reload']);
     const propertyName = node => {
       if (!node) return null;
@@ -154,6 +163,13 @@ function rewriteJS(js) {
     const visit = (node, parent = null) => {
       if (!node || typeof node !== 'object') return;
       if (parent) currentParents.set(node, parent);
+      if (node.type === 'ImportDeclaration' || node.type === 'ExportNamedDeclaration' ||
+          node.type === 'ExportAllDeclaration') rewriteModuleSpecifier(node.source);
+      if (node.type === 'ImportExpression') rewriteModuleSpecifier(node.source);
+      if (node.type === 'CallExpression' && node.callee &&
+          node.callee.type === 'Identifier' && node.callee.name === 'importScripts') {
+        node.arguments.forEach(rewriteModuleSpecifier);
+      }
       if (node.type === 'MemberExpression') {
         const prop = propertyName(node);
         if (prop === 'location' && node.object && node.object.type === 'Identifier' &&
@@ -906,6 +922,7 @@ try {
     window.fetch = markNative(function fetch(input, init) {
       try {
         if (typeof input === 'string') input = px(input);
+        else if (input instanceof URL) input = px(input.href);
         else if (input instanceof Request) {
           var u2 = px(input.url);
           if (u2 !== input.url) input = new Request(u2, input);
@@ -1554,7 +1571,7 @@ function rewriteHTML(html, targetUrl) {
       /^(text|application)\/(x-)?(java|ecma)script(?:\s*;|$)/.test(type) ||
       type === 'text/babel' || type === 'text/jsx';
     if (executable) {
-      const rewritten = rewriteJS(content);
+      const rewritten = rewriteJS(content, base);
       if (rewritten !== content) $(el).text(rewritten);
     }
   });
@@ -1564,7 +1581,7 @@ function rewriteHTML(html, targetUrl) {
       if (!/^on[a-z]+$/i.test(attr)) return;
       const original = $(el).attr(attr);
       if (typeof original !== 'string') return;
-      const rewritten = rewriteJS(original);
+      const rewritten = rewriteJS(original, base);
       if (rewritten !== original) $(el).attr(attr, rewritten);
     });
   });
@@ -1964,7 +1981,7 @@ async function proxyRequest(targetUrl, req, res) {
   }
   if (ct.includes('javascript') || ct.includes('ecmascript')) {
     try {
-      const js = rewriteJS(buf.toString('utf-8'));
+      const js = rewriteJS(buf.toString('utf-8'), targetUrl);
       return res.status(resp.status).send(js);
     } catch { return res.status(resp.status).send(buf); }
   }
