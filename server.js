@@ -318,7 +318,10 @@ function px(url) {
   try {
     var abs;
     if (/^https?:\\/\\//.test(t))       { abs = t; }
-    else if (t.indexOf('//') === 0)     { abs = 'https:' + t; }
+    else if (t.indexOf('//') === 0)     {
+      try { abs = new URL(t, RESOURCE_BASE || getProxiedUrl()).href; }
+      catch(e) { abs = 'https:' + t; }
+    }
     else if (t.charAt(0) === '/')       {
       try { abs = new URL(t, RESOURCE_BASE || getProxiedUrl()).href; }
       catch(e) { abs = ORIGIN + t; }
