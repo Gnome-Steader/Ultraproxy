@@ -530,6 +530,20 @@ try {
         if (!scope || !scope.domain || !scope.path) return null;
         return { scope: scope, name: rest.slice(split + 1) };
       }
+      function _cookiePayloadEncode(value, flags) {
+        return 'v1.' + btoa(unescape(encodeURIComponent(JSON.stringify({ value: value, flags: flags }))))
+          .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+      }
+      function _cookiePayloadDecode(value) {
+        try {
+          if (typeof value !== 'string' || value.indexOf('v1.') !== 0) return null;
+          var token = value.slice(3).replace(/-/g, '+').replace(/_/g, '/');
+          while (token.length % 4) token += '=';
+          var parsed = JSON.parse(decodeURIComponent(escape(atob(token))));
+          if (!parsed || typeof parsed.value !== 'string' || !parsed.flags) return null;
+          return parsed;
+        } catch(e) { return null; }
+      }
       function _cookieCurrentUrl() {
         try { return new URL(getProxiedUrl()); } catch(e) {
           try { return new URL(TURL); } catch(e2) { return new URL(ORIGIN + '/'); }
@@ -567,10 +581,11 @@ try {
             var virtual = _cookieScopeFromName(item.slice(0, eq));
             if (!virtual) return;
             var scope = virtual.scope;
-            if (scope.httpOnly || !_cookieDomainMatches(target.hostname, scope)) return;
+            var payload = _cookiePayloadDecode(item.slice(eq + 1));
+            if (!payload || payload.flags.httpOnly || !_cookieDomainMatches(target.hostname, scope)) return;
             if (!_cookiePathMatches(target.pathname, scope.path)) return;
-            if (scope.secure && target.protocol !== 'https:') return;
-            visible.push(virtual.name + '=' + item.slice(eq + 1));
+            if (payload.flags.secure && target.protocol !== 'https:') return;
+            visible.push(virtual.name + '=' + payload.value);
           });
           return visible.join('; ');
         },
@@ -601,12 +616,11 @@ try {
             if (!domain || (host !== domain && host.slice(-(domain.length + 1)) !== '.' + domain)) return;
             var path = attrs.path && attrs.path.charAt(0) === '/' ? attrs.path : _cookieDefaultPath(target.pathname);
             var secure = Object.prototype.hasOwnProperty.call(attrs, 'secure');
-            var scope = {
-              domain: domain, hostOnly: hostOnly, path: path, secure: secure,
-              httpOnly: false, sameSite: String(attrs.samesite || '').toLowerCase()
-            };
+            var scope = { domain: domain, hostOnly: hostOnly, path: path };
+            var flags = { secure: secure, httpOnly: false, sameSite: String(attrs.samesite || '').toLowerCase() };
             var proxyName = _cookiePrefix + _cookieHex(scope) + '_' + originalName;
-            var out = proxyName + '=' + value + '; Path=/proxy/';
+            var proxyValue = _cookiePayloadEncode(value, flags);
+            var out = proxyName + '=' + proxyValue + '; Path=/proxy/';
 
             if (attrs['max-age'] !== undefined) out += '; Max-Age=' + attrs['max-age'];
             if (attrs.expires !== undefined) out += '; Expires=' + attrs.expires;
@@ -1489,9 +1503,24 @@ function parseVirtualCookieName(name) {
   return { scope, name: rest.slice(split + 1) };
 }
 
+function encodeCookiePayload(value, flags) {
+  return 'v1.' + Buffer.from(JSON.stringify({ value, flags }), 'utf8').toString('base64url');
+}
+
+function decodeCookiePayload(value) {
+  if (typeof value !== 'string' || !value.startsWith('v1.')) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(value.slice(3), 'base64url').toString('utf8'));
+    if (!parsed || typeof parsed.value !== 'string' || !parsed.flags || typeof parsed.flags !== 'object') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 function cookieDomainMatches(hostname, scope) {
   const host = String(hostname || '').toLowerCase();
-  const domain = String(scope.domain || '').replace(/^\\./, '').toLowerCase();
+  const domain = String(scope.domain || '').replace(/^\./, '').toLowerCase();
   if (!host || !domain) return false;
   return scope.hostOnly ? host === domain : (host === domain || host.endsWith('.' + domain));
 }
@@ -1515,18 +1544,21 @@ function getUpstreamCookieHeader(cookieHeader, targetUrl) {
     if (equals <= 0) continue;
     const virtual = parseVirtualCookieName(item.slice(0, equals).trim());
     if (!virtual) continue;
+    const payload = decodeCookiePayload(item.slice(equals + 1));
+    if (!payload) continue;
     const scope = virtual.scope;
     if (!cookieDomainMatches(target.hostname, scope)) continue;
     if (!cookiePathMatches(target.pathname, scope.path)) continue;
-    if (scope.secure && target.protocol !== 'https:') continue;
+    if (payload.flags.secure && target.protocol !== 'https:') continue;
     matching.push({
       pathLength: String(scope.path).length,
-      header: virtual.name + '=' + item.slice(equals + 1)
+      header: virtual.name + '=' + payload.value
     });
   }
   matching.sort((a, b) => b.pathLength - a.pathLength);
   return matching.map(item => item.header).join('; ');
 }
+
 
 function isSecureProxyRequest(req) {
   const forwarded = String(req?.headers?.['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
@@ -1546,7 +1578,7 @@ function rewriteSetCookieForProxy(cookieString, targetUrl, req) {
   if (equals <= 0) return null;
   const originalName = pair.slice(0, equals).trim();
   const value = pair.slice(equals + 1);
-  if (!originalName || /[\\s;,]/.test(originalName)) return null;
+  if (!originalName || /[\s;,]/.test(originalName)) return null;
 
   const attrs = new Map();
   for (const part of parts) {
@@ -1560,7 +1592,7 @@ function rewriteSetCookieForProxy(cookieString, targetUrl, req) {
 
   const domainAttr = attrs.get('domain');
   const hostOnly = !domainAttr;
-  const domain = String(domainAttr || target.hostname).replace(/^\\./, '').toLowerCase();
+  const domain = String(domainAttr || target.hostname).replace(/^\./, '').toLowerCase();
   const host = target.hostname.toLowerCase();
   if (!domain || (!hostOnly && (host !== domain && !host.endsWith('.' + domain)))) return null;
   if (!domain.includes('.') && domain !== host) return null;
@@ -1572,12 +1604,13 @@ function rewriteSetCookieForProxy(cookieString, targetUrl, req) {
   const sameSite = attrs.get('samesite') || '';
   const proxySecure = isSecureProxyRequest(req);
 
-  // Secure upstream cookies require HTTPS (localhost is treated as secure by browsers).
-  if (secure && !proxySecure) return null;
-
-  const scope = { domain, hostOnly, path: cookiePath, secure, httpOnly, sameSite: sameSite.toLowerCase() };
+  // Keep cookie identity independent of flags so Max-Age=0 and Expires deletions
+  // replace the original cookie even when the deletion omits optional attributes.
+  const scope = { domain, hostOnly, path: cookiePath };
+  const flags = { secure, httpOnly, sameSite: sameSite.toLowerCase() };
   const proxyName = UPSTREAM_COOKIE_PREFIX + encodeCookieScope(scope) + '_' + originalName;
-  const output = [proxyName + '=' + value, 'Path=/proxy/'];
+  const proxyValue = encodeCookiePayload(value, flags);
+  const output = [proxyName + '=' + proxyValue, 'Path=/proxy/'];
 
   if (attrs.has('max-age')) output.push('Max-Age=' + attrs.get('max-age'));
   if (attrs.has('expires')) output.push('Expires=' + attrs.get('expires'));
@@ -1592,6 +1625,7 @@ function rewriteSetCookieForProxy(cookieString, targetUrl, req) {
   if (attrs.has('priority')) output.push('Priority=' + attrs.get('priority'));
   return output.join('; ');
 }
+
 
 function rewriteSetCookieHeaders(res, cookies, targetUrl, req) {
   if (!cookies) return;
