@@ -847,6 +847,50 @@ try {
   window.XMLHttpRequest = PXR;
 } catch(e) {}
 
+// New edits
+// Scramjet-inspired worker URL interception. The server-side JS rewriter still
+// applies to fetched worker scripts; this ensures their entry URLs use the proxy.
+try {
+  var _NativeWorker = window.Worker;
+  if (_NativeWorker) {
+    var PxWorker = markNative(function Worker(url, options) {
+      var rewritten = url;
+      try {
+        if (url instanceof URL) rewritten = px(url.href);
+        else rewritten = px(String(url));
+      } catch(e) {}
+      return options === undefined
+        ? new _NativeWorker(rewritten)
+        : new _NativeWorker(rewritten, options);
+    }, 'Worker');
+    PxWorker.prototype = _NativeWorker.prototype;
+    try { Object.setPrototypeOf(PxWorker, _NativeWorker); } catch(e) {}
+    window.Worker = PxWorker;
+    maskDesc(window, 'Worker', { value: PxWorker, writable: true, enumerable: false, configurable: true });
+  }
+} catch(e) {}
+
+try {
+  var _NativeSharedWorker = window.SharedWorker;
+  if (_NativeSharedWorker) {
+    var PxSharedWorker = markNative(function SharedWorker(url, options) {
+      var rewritten = url;
+      try {
+        if (url instanceof URL) rewritten = px(url.href);
+        else rewritten = px(String(url));
+      } catch(e) {}
+      return options === undefined
+        ? new _NativeSharedWorker(rewritten)
+        : new _NativeSharedWorker(rewritten, options);
+    }, 'SharedWorker');
+    PxSharedWorker.prototype = _NativeSharedWorker.prototype;
+    try { Object.setPrototypeOf(PxSharedWorker, _NativeSharedWorker); } catch(e) {}
+    window.SharedWorker = PxSharedWorker;
+    maskDesc(window, 'SharedWorker', { value: PxSharedWorker, writable: true, enumerable: false, configurable: true });
+  }
+} catch(e) {}
+// end new edits
+
 // ── 10. WebSocket ─────────────────────────────────────────────────────────────
 // Let WebSocket connections pass directly to real game servers. Make wrapper invisible.
 try {
