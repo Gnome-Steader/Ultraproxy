@@ -105,6 +105,23 @@
 
     @keyframes fadeIn { from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none} }
     @media(max-width:600px) { #dl-btn span{display:none} .logo-text{display:none} }
+  
+    #devtools-code-dialog,#devtools-overlay{position:fixed;inset:0;z-index:10000;display:none;align-items:center;justify-content:center;padding:20px;background:#000b;font-family:var(--font-mono)}
+    #devtools-code-dialog.open,#devtools-overlay.open{display:flex}
+    #devtools-code-card{width:min(360px,100%);padding:22px;background:#11111e;border:1px solid #3b3b65;border-radius:12px;font-family:var(--font-ui)}
+    #devtools-code-card h2{font-size:1.1rem;margin-bottom:8px}#devtools-code-card p{color:#9292b4;font-size:.8rem;line-height:1.5;margin-bottom:14px}
+    #devtools-code-input,#devtools-filter-text{width:100%;padding:10px;background:#080811;color:#fff;border:1px solid #34345c;border-radius:6px;font:13px var(--font-mono);margin-bottom:10px}
+    #devtools-code-error{min-height:20px;color:#ff7777;font-size:.75rem}
+    #devtools-panel{width:min(1100px,100%);height:min(760px,92vh);display:flex;flex-direction:column;overflow:hidden;background:#0b0b13;border:1px solid #34345c;border-radius:12px;box-shadow:0 24px 90px #000b}
+    #devtools-head,#devtools-filters{display:flex;align-items:center;gap:7px;padding:10px 12px;background:#151526;border-bottom:1px solid #2b2b48;flex-wrap:wrap}
+    #devtools-head strong{font-size:12px;color:#eee}#devtools-status{font-size:10px;color:#8585ad;margin-right:auto}
+    .devtools-btn{border:1px solid #353556;border-radius:6px;padding:6px 9px;background:#202039;color:#dadaee;cursor:pointer;font:11px var(--font-mono)}
+    .devtools-btn.active{border-color:#6c63ff;background:#302b61}#devtools-filter-text{margin:0 0 0 auto;width:190px}
+    #devtools-log{flex:1;overflow:auto;background:#090910}.devlog-row{display:grid;grid-template-columns:75px 65px minmax(0,1fr);gap:8px;padding:6px 10px;border-bottom:1px solid #171724;font:11px/1.55 var(--font-mono);white-space:pre-wrap;overflow-wrap:anywhere}
+    .devlog-time{color:#73738f}.devlog-level{font-weight:bold;text-transform:uppercase}.devlog-level.log{color:#aaa}.devlog-level.info{color:#70c7ff}.devlog-level.warn{color:#ffca70}.devlog-level.error{color:#ff7777}.devlog-level.network{color:#7de0b2}
+    .devlog-row.warn{background:#211b0d55}.devlog-row.error{background:#28101055}#devtools-empty,#devtools-foot{padding:12px;color:#77779b;font-size:10px}#devtools-empty{text-align:center;padding:28px}
+    @media(max-width:600px){#devtools-overlay{padding:8px}.devlog-row{grid-template-columns:54px 48px minmax(0,1fr);gap:5px;font-size:10px}#devtools-filter-text{width:100%;margin:0}}
+
   </style>
 </head>
 <body>
@@ -185,6 +202,20 @@
         </div>
       </div>
     </div>
+
+
+  <div id="devtools-code-dialog" role="dialog" aria-modal="true">
+    <form id="devtools-code-card"><h2>UltraProxy Developer Console</h2><p>Enter the local developer access code to view app diagnostics.</p>
+      <input id="devtools-code-input" type="password" inputmode="numeric" autocomplete="off" placeholder="Access code" aria-label="Developer access code">
+      <div id="devtools-code-error" role="status"></div><div style="display:flex;justify-content:flex-end;gap:8px"><button class="devtools-btn" id="devtools-code-cancel" type="button">Cancel</button><button class="devtools-btn" type="submit">Unlock console</button></div>
+    </form>
+  </div>
+  <div id="devtools-overlay" role="dialog" aria-modal="true" aria-label="UltraProxy developer console"><section id="devtools-panel">
+    <header id="devtools-head"><strong>ULTRAPROXY / CONSOLE</strong><span id="devtools-status">App diagnostics · local session</span><button class="devtools-btn" id="devtools-copy">Copy logs</button><button class="devtools-btn" id="devtools-clear">Clear</button><button class="devtools-btn" id="devtools-close">Close</button></header>
+    <nav id="devtools-filters"><button class="devtools-btn active" data-devfilter="all">All</button><button class="devtools-btn" data-devfilter="log">Log</button><button class="devtools-btn" data-devfilter="info">Info</button><button class="devtools-btn" data-devfilter="warn">Warnings</button><button class="devtools-btn" data-devfilter="error">Errors</button><button class="devtools-btn" data-devfilter="network">Network</button><input id="devtools-filter-text" type="search" placeholder="Filter messages…" aria-label="Filter console messages"></nav>
+    <div id="devtools-log"><div id="devtools-empty">No messages yet. App errors and diagnostic events will appear here.</div></div>
+    <footer id="devtools-foot">In-app diagnostics, not Chrome DevTools. It cannot inspect browser internals or override administrator controls.</footer>
+  </section></div>
 
     <iframe
       id="proxy-frame"
@@ -477,6 +508,7 @@
   // ── Frame events ────────────────────────────────────────────────────
   frame.addEventListener('load', () => {
     stopLoad();
+    devAttachFrame();
     if (!isProxying) return;
     try {
       const href = frame.contentWindow.location.href;
@@ -546,6 +578,29 @@
     // Fallback: use lastTargetUrl
     if (lastTargetUrl) updateUrlBar(lastTargetUrl);
   });
+
+
+  // Built-in app diagnostics console. The code is a convenience gate, not security.
+  const devDialog=document.getElementById('devtools-code-dialog'),devOverlay=document.getElementById('devtools-overlay'),devInput=document.getElementById('devtools-code-input'),devCodeError=document.getElementById('devtools-code-error'),devLog=document.getElementById('devtools-log'),devSearch=document.getElementById('devtools-filter-text');
+  const devEntries=[];let devFilter='all',devUnlocked=false;const DEV_ACCESS_CODE='5768';
+  function devText(v){if(typeof v==='string')return v;if(v instanceof Error)return v.stack||v.message;try{return v===undefined?'undefined':JSON.stringify(v)}catch{return String(v)}}
+  function devRecord(level,args,source='app'){devEntries.push({time:new Date().toLocaleTimeString(),level,message:Array.from(args||[]).map(devText).join(' '),source});if(devEntries.length>1000)devEntries.shift();if(devUnlocked)devRender()}
+  function devRender(){const q=devSearch.value.toLowerCase().trim(),items=devEntries.filter(x=>(devFilter==='all'||x.level===devFilter)&&(!q||(x.message+' '+x.source).toLowerCase().includes(q)));devLog.textContent='';if(!items.length){const e=document.createElement('div');e.id='devtools-empty';e.textContent=devEntries.length?'No messages match these filters.':'No messages yet.';devLog.append(e);return}const frag=document.createDocumentFragment();items.forEach(x=>{const row=document.createElement('div');row.className='devlog-row '+x.level;for(const [cls,txt] of [['devlog-time',x.time],['devlog-level',x.level],['devlog-message',(x.source==='app'?'':'['+x.source+'] ')+x.message]]){const span=document.createElement('span');span.className=cls;span.textContent=txt;row.append(span)}frag.append(row)});devLog.append(frag);devLog.scrollTop=devLog.scrollHeight}
+  function devOpen(){if(devUnlocked){devOverlay.classList.add('open');devRender();return}devInput.value='';devCodeError.textContent='';devDialog.classList.add('open');setTimeout(()=>devInput.focus(),0)}
+  function devClose(){devOverlay.classList.remove('open');devDialog.classList.remove('open')}
+  function devSettingsActive(){return /^ultra:\/\/settings\/?$/i.test(urlbar.value.trim())||(isProxying&&(lastFrameSrc==='/settings'||lastFrameSrc.startsWith('/settings?')))}
+  document.addEventListener('keydown',e=>{if(e.ctrlKey&&!e.altKey&&!e.metaKey&&e.key.toLowerCase()==='d'&&devSettingsActive()){e.preventDefault();e.stopPropagation();devOpen()}if(e.key==='Escape'&&(devDialog.classList.contains('open')||devOverlay.classList.contains('open')))devClose()},true);
+  document.getElementById('devtools-code-cancel').addEventListener('click',()=>devDialog.classList.remove('open'));
+  document.getElementById('devtools-code-card').addEventListener('submit',e=>{e.preventDefault();if(devInput.value===DEV_ACCESS_CODE){devUnlocked=true;devDialog.classList.remove('open');devOverlay.classList.add('open');devRecord('info',['Developer console opened.'],'console');devRender()}else{devCodeError.textContent='Incorrect access code.';devInput.select()}});
+  document.getElementById('devtools-close').addEventListener('click',devClose);
+  document.getElementById('devtools-clear').addEventListener('click',()=>{devEntries.length=0;devRender()});
+  document.getElementById('devtools-copy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(devEntries.map(x=>'['+x.time+'] ['+x.level.toUpperCase()+'] ['+x.source+'] '+x.message).join('\n'));devRecord('info',['Copied diagnostic logs.'],'console')}catch{devRecord('warn',['Clipboard unavailable; copy messages manually.'],'console')}});
+  document.querySelectorAll('[data-devfilter]').forEach(b=>b.addEventListener('click',()=>{devFilter=b.dataset.devfilter;document.querySelectorAll('[data-devfilter]').forEach(x=>x.classList.toggle('active',x===b));devRender()}));devSearch.addEventListener('input',devRender);
+  ['log','info','warn','error','debug'].forEach(m=>{const original=console[m].bind(console);console[m]=(...args)=>{original(...args);devRecord(m==='debug'?'log':m,args)}});
+  window.addEventListener('error',e=>{if(e.target&&e.target!==window)devRecord('error',['Resource failed to load',e.target.src||e.target.href||e.target.tagName],'resource');else devRecord('error',[e.message||'Uncaught JavaScript error',e.filename||'',e.lineno?'line '+e.lineno:''],'window')},true);
+  window.addEventListener('unhandledrejection',e=>devRecord('error',['Unhandled promise rejection:',e.reason],'promise'));
+  const devFetch=window.fetch.bind(window);window.fetch=async(...args)=>{const url=typeof args[0]==='string'?args[0]:(args[0]&&args[0].url)||'',start=performance.now();try{const response=await devFetch(...args);if(!response.ok)devRecord('network',[response.status+' '+response.statusText,url,Math.round(performance.now()-start)+'ms'],'fetch');return response}catch(err){devRecord('error',['Request failed:',url,err],'fetch');throw err}};
+  function devAttachFrame(){try{const w=frame.contentWindow;if(!w||!w.document)return;['log','info','warn','error','debug'].forEach(m=>{const original=w.console[m].bind(w.console);w.console[m]=(...args)=>{original(...args);devRecord(m==='debug'?'log':m,args,'page')}});w.addEventListener('error',e=>devRecord('error',[e.message||'Page JavaScript error',e.filename||'',e.lineno?'line '+e.lineno:''],'page'));w.addEventListener('unhandledrejection',e=>devRecord('error',['Page promise rejection:',e.reason],'page'))}catch{devRecord('info',['Page console bridge unavailable for this frame.'],'page')}}
 
   // ── Init ───────────────────────────────────────────────────────────
   setTimeout(() => si.focus(), 80);
