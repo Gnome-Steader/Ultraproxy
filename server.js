@@ -15,7 +15,9 @@ const PORT = process.env.PORT || 3000;
 
 // ── SOCKS5 Proxy ──────────────────────────────────────────────────────────────
 const proxyUrl = 'socks5://mevyuxgz:45mlsshm4lr6@216.10.27.159:6837';
-const enableStickyGoogleProxy = process.env.ENABLE_STICKY_GOOGLE_PROXY === '1';
+let enableStickyGoogleProxy = process.env.ENABLE_STICKY_GOOGLE_PROXY !== '0';
+let enableSocksProxy = process.env.ENABLE_SOCKS_PROXY !== '0';
+let enableSpecialYoutube = process.env.ENABLE_SPECIAL_YOUTUBE !== '0';
 console.log('🔒 SOCKS5 Proxy configured: 216.10.27.159:6837');
 
 const proxyAgentCache = new Map();
@@ -39,6 +41,7 @@ function buildStickyGoogleProxyUrl(baseProxyUrl, req) {
   return u.toString();
 }
 function getRequestProxyAgent(targetUrl, req) {
+  if (!enableSocksProxy) return undefined;
   let resolvedProxyUrl = proxyUrl;
   try {
     const host = new URL(targetUrl).hostname;
@@ -1381,6 +1384,22 @@ h2{color:#ff6b6b;margin:0 0 .4em}p{opacity:.75;font-size:.95em;line-height:1.6}
 </div></body></html>`;
 }
 
+function renderSettingsPage() {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>UltraProxy Settings</title>
+<style>*{box-sizing:border-box}body{margin:0;padding:24px;background:#0d0d18;color:#eee;font:15px system-ui,sans-serif}.wrap{max-width:680px;margin:auto}h1{margin:0 0 8px;font-size:1.6rem}p{color:#999;margin:0 0 24px}.setting{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:18px 0;border-top:1px solid #292941}.setting h2{font-size:1rem;margin:0 0 5px}.setting small{display:block;color:#999;line-height:1.45}.switch{position:relative;width:48px;height:26px;flex:0 0 auto}.switch input{opacity:0;width:0;height:0}.slider{position:absolute;inset:0;background:#343449;border-radius:20px;cursor:pointer;transition:.2s}.slider:before{content:'';position:absolute;width:20px;height:20px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#6c63ff}.switch input:checked+.slider:before{transform:translateX(22px)}#status{height:20px;color:#67e8f9;font-size:.85rem;margin-top:18px}</style></head>
+<body><main class="wrap"><h1>Settings</h1><p>Control how UltraProxy connects and searches.</p>
+<div class="setting"><div><h2>Sticky Google proxy</h2><small>Keep a stable SOCKS5 session for Google requests from this browser.</small></div><label class="switch"><input id="sticky" type="checkbox"><span class="slider"></span></label></div>
+<div class="setting"><div><h2>SOCKS5 proxy</h2><small>Route upstream web requests through the configured SOCKS5 server.</small></div><label class="switch"><input id="socks" type="checkbox"><span class="slider"></span></label></div>
+<div class="setting"><div><h2>Special YouTube search</h2><small>Use YouTube.js search and playback. Turn off to browse normal YouTube through the web proxy.</small></div><label class="switch"><input id="youtube" type="checkbox"><span class="slider"></span></label></div>
+<div id="status" role="status"></div></main><script>
+const fields={sticky:'stickyGoogleProxy',socks:'socksProxy',youtube:'specialYoutube'};
+async function load(){const r=await fetch('/api/settings');const s=await r.json();for(const [id,key] of Object.entries(fields))document.getElementById(id).checked=!!s[key];}
+async function save(id){const body={[fields[id]]:document.getElementById(id).checked};const r=await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const s=await r.json();document.getElementById('status').textContent=r.ok?'Saved':'Could not save';window.top.postMessage({type:'settingsChanged',settings:s},'*');setTimeout(()=>document.getElementById('status').textContent='',1200)}
+for(const id of Object.keys(fields))document.getElementById(id).addEventListener('change',()=>save(id));load().catch(()=>document.getElementById('status').textContent='Could not load settings');
+</script></body></html>`;
+}
+
 // ─── YouTube: Search Page ─────────────────────────────────────────────────────
 function renderYTSearch(q, videos) {
   const items = videos.map(v => `
@@ -1476,9 +1495,31 @@ app.options('*', (req,res) => {
 });
 app.use(express.static(__dirname, { index: false }));
 
+app.use(express.json());
+app.get('/settings', (req, res) => res.send(renderSettingsPage()));
+app.get('/api/settings', (req, res) => res.json({
+  stickyGoogleProxy: enableStickyGoogleProxy,
+  socksProxy: enableSocksProxy,
+  specialYoutube: enableSpecialYoutube,
+}));
+app.post('/api/settings', (req, res) => {
+  if (typeof req.body?.stickyGoogleProxy === 'boolean') enableStickyGoogleProxy = req.body.stickyGoogleProxy;
+  if (typeof req.body?.socksProxy === 'boolean') enableSocksProxy = req.body.socksProxy;
+  if (typeof req.body?.specialYoutube === 'boolean') enableSpecialYoutube = req.body.specialYoutube;
+  res.json({
+    stickyGoogleProxy: enableStickyGoogleProxy,
+    socksProxy: enableSocksProxy,
+    specialYoutube: enableSpecialYoutube,
+  });
+});
+
 // ─── YouTube: Search ──────────────────────────────────────────────────────────
 app.get('/yt-search', async (req, res) => {
   const q = (req.query.q || '').trim();
+  if (!enableSpecialYoutube) {
+    const target = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(q);
+    return res.redirect(302, toProxyPath(target));
+  }
   res.setHeader('Content-Type','text/html; charset=utf-8');
   if (!q) return res.send(renderYTSearch('', []));
   try {
@@ -1507,6 +1548,9 @@ app.get('/yt-search', async (req, res) => {
 // ─── YouTube: Watch ───────────────────────────────────────────────────────────
 app.get('/yt-watch', async (req, res) => {
   const id = (req.query.v || '').trim();
+  if (!enableSpecialYoutube && id) {
+    return res.redirect(302, toProxyPath('https://www.youtube.com/watch?v=' + encodeURIComponent(id)));
+  }
   res.setHeader('Content-Type','text/html; charset=utf-8');
   if (!id) return res.redirect('/yt-search');
   try {

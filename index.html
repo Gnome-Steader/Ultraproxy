@@ -206,6 +206,10 @@
   let lastTargetUrl = '';
   // Saved frame src for reload — frame.src can change due to SPA nav
   let lastFrameSrc  = '';
+  let specialYoutubeEnabled = true;
+  fetch('/api/settings').then(r => r.json()).then(s => {
+    if (typeof s.specialYoutube === 'boolean') specialYoutubeEnabled = s.specialYoutube;
+  }).catch(() => {});
 
   const frame    = document.getElementById('proxy-frame');
   const homeDiv  = document.getElementById('home');
@@ -264,7 +268,9 @@
       case 'google':  return { url: 'https://www.google.com/search?q=' + enc, direct: true };
       case 'brave':   return { url: 'https://search.brave.com/search?q=' + enc, direct: true };
       case 'bing':    return { url: 'https://www.bing.com/search?q=' + enc, direct: true };
-      case 'youtube': return { url: '/yt-search?q=' + enc, direct: false };
+      case 'youtube': return specialYoutubeEnabled
+        ? { url: '/yt-search?q=' + enc, direct: false }
+        : { url: 'https://www.youtube.com/results?search_query=' + enc, direct: true };
       default:        return { url: 'https://duckduckgo.com/?q=' + enc, direct: true };
     }
   }
@@ -285,7 +291,7 @@
     // Intercept YouTube.com watch URLs → use our API player instead
     try {
       const parsed = new URL(url);
-      if (/^(www\.)?youtube\.com$/i.test(parsed.hostname)) {
+      if (specialYoutubeEnabled && /^(www\.)?youtube\.com$/i.test(parsed.hostname)) {
         const v = parsed.searchParams.get('v');
         if (parsed.pathname === '/watch' && v) {
           loadLocal('/yt-watch?v=' + encodeURIComponent(v));
@@ -319,7 +325,9 @@
     frame.classList.add('visible');
     frame.src = url;
     lastFrameSrc = url;
-    if (url.startsWith('/yt-search')) {
+    if (url.startsWith('/settings')) {
+      urlbar.value = 'ultra://settings';
+    } else if (url.startsWith('/yt-search')) {
       const q = new URLSearchParams(url.split('?')[1] || '').get('q') || '';
       urlbar.value = q ? '▶️ YouTube: ' + q : '▶️ YouTube Search';
       lastYtSearch = url;
@@ -359,7 +367,8 @@
   function parseInput(raw) {
     raw = raw.trim();
     if (!raw) return null;
-    if (engine === 'youtube') {
+    if (/^ultra:\/\/settings\/?$/i.test(raw)) return { url: '/settings', direct: false };
+    if (engine === 'youtube' && specialYoutubeEnabled) {
       return { url: '/yt-search?q=' + encodeURIComponent(raw), direct: false };
     }
     if (looksLikeUrl(raw)) {
@@ -411,7 +420,9 @@
     wiki    : () => navigateTo('https://www.wikipedia.org'),
     reddit  : () => navigateTo('https://www.reddit.com'),
     github  : () => navigateTo('https://github.com'),
-    youtube : () => loadLocal('/yt-search'),
+    youtube : () => specialYoutubeEnabled
+      ? loadLocal('/yt-search')
+      : navigateTo('https://www.youtube.com'),
   };
   document.querySelectorAll('.qlink').forEach(el => {
     el.addEventListener('click', () => {
@@ -476,7 +487,7 @@
       if (path.startsWith('/yt-search') || path.startsWith('/yt-watch')) return;
 
       // Detect frame escape: navigated to a non-proxied path on our server
-      if (path && !path.startsWith('/proxy/') && !path.startsWith('/yt-')) {
+      if (path && path !== '/settings' && !path.startsWith('/proxy/') && !path.startsWith('/yt-')) {
         frame.srcdoc = buildBlockedPage(path);
         return;
       }
@@ -498,6 +509,13 @@
   // Handle proxyNav messages from the injection script (SPA navigation updates)
   window.addEventListener('message', e => {
     if (!e.data) return;
+
+    if (e.data.type === 'settingsChanged') {
+      if (e.data.settings && typeof e.data.settings.specialYoutube === 'boolean') {
+        specialYoutubeEnabled = e.data.settings.specialYoutube;
+      }
+      return;
+    }
 
     // Retry button from the blocked page
     if (e.data.type === 'retryNav') {
