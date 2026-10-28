@@ -9,6 +9,7 @@ const fs       = require('fs');
 const { URL }  = require('url');
 const { SocksProxyAgent } = require('socks-proxy-agent');
 const nodeFetch = require('node-fetch');
+const advancedRewriting = require('./advanced-rewriting');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -111,6 +112,13 @@ function toProxyPath(u) {
   if (u.startsWith('/proxy/')) return u;
   return '/proxy/' + u;
 }
+
+// Advanced response rewriting is deliberately layered after the existing HTML
+// rewriter so its runtime injection, form handling, and location shims stay intact.
+// Site-specific middleware can be registered on this pipeline as needed.
+const rewritePipeline = advancedRewriting.createRewritePipeline({
+  toProxyUrl: toProxyPath
+});
 
 function rewriteAttrValue(val, base) {
   if (!val) return val;
@@ -1327,21 +1335,39 @@ async function proxyRequest(targetUrl, req, res) {
 
   if (ct.includes('text/html')) {
     try {
-      const html = rewriteHTML(buf.toString('utf-8'), targetUrl);
+      const originalHtml = rewriteHTML(buf.toString('utf-8'), targetUrl);
+      // Apply the advanced URL/CSS pass after UltraProxy's established HTML
+      // rewrite so injected runtime code and existing site compatibility logic remain.
+      const html = rewritePipeline.rewriteHtml(originalHtml, {
+        sourceUrl: targetUrl,
+        baseUrl: targetUrl
+      });
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       return res.status(resp.status).send(html);
     } catch { return res.status(resp.status).send(buf); }
   }
   if (ct.includes('text/css')) {
     try {
-      const css = rewriteCSS(buf.toString('utf-8'), targetUrl);
+      // Advanced CSS rewriting resolves assets against the response URL and
+      // supports the same /proxy/<absolute-url> path used by this server.
+      const css = rewritePipeline.rewriteCss(buf.toString('utf-8'), {
+        sourceUrl: targetUrl,
+        baseUrl: targetUrl
+      });
       res.setHeader('Content-Type', 'text/css; charset=utf-8');
       return res.status(resp.status).send(css);
     } catch { return res.status(resp.status).send(buf); }
   }
   if (ct.includes('javascript') || ct.includes('ecmascript')) {
     try {
-      const js = rewriteJS(buf.toString('utf-8'));
+      // Rewrite static URL arguments/modules first, then preserve UltraProxy's
+      // existing location and navigation compatibility shims.
+      const advancedJs = rewritePipeline.rewriteJavaScript(buf.toString('utf-8'), {
+        sourceUrl: targetUrl,
+        baseUrl: targetUrl,
+        isModule: /(?:javascript|ecmascript)/i.test(ct) && /module/i.test(resp.headers['content-type'] || '')
+      });
+      const js = rewriteJS(advancedJs);
       return res.status(resp.status).send(js);
     } catch { return res.status(resp.status).send(buf); }
   }
