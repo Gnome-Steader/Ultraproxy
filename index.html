@@ -589,7 +589,7 @@
   function devOpen(){if(devUnlocked){devOverlay.classList.add('open');devRender();return}devInput.value='';devCodeError.textContent='';devDialog.classList.add('open');setTimeout(()=>devInput.focus(),0)}
   function devClose(){devOverlay.classList.remove('open');devDialog.classList.remove('open')}
   function devSettingsActive(){return /^ultra:\/\/settings\/?$/i.test(urlbar.value.trim())||(isProxying&&(lastFrameSrc==='/settings'||lastFrameSrc.startsWith('/settings?')))}
-  document.addEventListener('keydown',e=>{if(e.ctrlKey&&!e.shiftKey&&!e.altKey&&!e.metaKey&&e.key==='Enter'&&devSettingsActive()){e.preventDefault();e.stopPropagation();devOpen()}if(e.key==='Escape'&&(devDialog.classList.contains('open')||devOverlay.classList.contains('open')))devClose()},true);
+  document.addEventListener('keydown',e=>{if(e.ctrlKey&&e.shiftKey&&!e.altKey&&!e.metaKey&&e.key==='Enter'&&devSettingsActive()){e.preventDefault();e.stopPropagation();devOpen()}if(e.key==='Escape'&&(devDialog.classList.contains('open')||devOverlay.classList.contains('open')))devClose()},true);
   document.getElementById('devtools-code-cancel').addEventListener('click',()=>devDialog.classList.remove('open'));
   document.getElementById('devtools-code-card').addEventListener('submit',e=>{e.preventDefault();if(devInput.value===DEV_ACCESS_CODE){devUnlocked=true;devDialog.classList.remove('open');devOverlay.classList.add('open');devRecord('info',['Developer console opened.'],'console');devRender()}else{devCodeError.textContent='Incorrect access code.';devInput.select()}});
   document.getElementById('devtools-close').addEventListener('click',devClose);
