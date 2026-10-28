@@ -145,7 +145,7 @@ function rewriteHtml(html, sourceUrl, toProxyUrl = createProxyPath) {
         if (text) el.text(rewriteCss(text, baseUrl, toProxyUrl));
       }
     });
-    if (baseHref) $('base[href]').first().attr('href', baseUrl);
+    if (baseHref) $('base[href]').first().attr('href', rewriteUrl(baseUrl, sourceUrl, toProxyUrl));
     return $.html();
   } catch {
     return html;
@@ -194,6 +194,32 @@ function tokenizeJavaScript(source) {
       while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) i++;
       i = Math.min(source.length, i + 2);
       continue;
+    }
+
+    // Avoid treating quotes inside common regex literals as ordinary strings.
+    if (ch === '/') {
+      const previous = tokens[tokens.length - 1];
+      const previousValue = previous && previous.value;
+      const regexMayStart = !previous ||
+        (previous.type === 'punct' && /^(?:\(|\{|\[|=|:|,|!|\?|;|&|\||\+|-|\*|%)$/.test(previousValue)) ||
+        (previous.type === 'identifier' && /^(?:return|throw|case|delete|void|typeof|instanceof|in|of|yield|await)$/.test(previousValue));
+      if (regexMayStart) {
+        const start = i++;
+        let inCharacterClass = false;
+        let escapedRegex = false;
+        while (i < source.length) {
+          const current = source[i++];
+          if (escapedRegex) escapedRegex = false;
+          else if (current === '\\') escapedRegex = true;
+          else if (current === '[') inCharacterClass = true;
+          else if (current === ']') inCharacterClass = false;
+          else if (current === '/' && !inCharacterClass) break;
+          else if (current === '\n' || current === '\r') break;
+        }
+        while (i < source.length && /[a-z]/i.test(source[i])) i++;
+        tokens.push({ type: 'regex', start, end: i, value: '' });
+        continue;
+      }
     }
 
     if (ch === '"' || ch === "'") {
