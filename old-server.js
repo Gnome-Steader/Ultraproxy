@@ -952,22 +952,17 @@ async function proxyRequest(targetUrl, req, res) {
 
   if (ct.includes('text/html')) {
     try {
-      const originalHtml = rewriteHTML(buf.toString('utf-8'), targetUrl);
-      const html = rewritePipeline.rewriteHtml(originalHtml, {
-        sourceUrl: targetUrl,
-        baseUrl: targetUrl
-      });
+      // Keep the established HTML rewrite as the single page transformation.
+      // It injects the runtime and handles URL-bearing markup, forms and lazy assets.
+      const html = rewriteHTML(buf.toString('utf-8'), targetUrl);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       return res.status(resp.status).send(html);
     } catch { return res.status(resp.status).send(buf); }
   }
   if (ct.includes('text/css')) {
     try {
-      const originalCss = rewriteCSS(buf.toString('utf-8'), targetUrl);
-      const css = rewritePipeline.rewriteCss(originalCss, {
-        sourceUrl: targetUrl,
-        baseUrl: targetUrl
-      });
+      // CSS gets one URL rewrite pass to avoid rewriting proxy URLs twice.
+      const css = rewriteCSS(buf.toString('utf-8'), targetUrl);
       res.setHeader('Content-Type', 'text/css; charset=utf-8');
       return res.status(resp.status).send(css);
     } catch { return res.status(resp.status).send(buf); }
@@ -979,8 +974,9 @@ async function proxyRequest(targetUrl, req, res) {
         baseUrl: targetUrl,
         isModule: /(?:javascript|ecmascript)/i.test(ct) && /module/i.test(resp.headers['content-type'] || '')
       });
-      const js = rewriteJS(advancedJs);
-      return res.status(resp.status).send(js);
+      // Use the advanced transform output directly. old-server.js has no
+      // rewriteJS() function; calling it throws and silently returns original JS.
+      return res.status(resp.status).send(advancedJs);
     } catch { return res.status(resp.status).send(buf); }
   }
   return res.status(resp.status).send(buf);
@@ -1293,22 +1289,16 @@ app.get('/proxy/:token', async (req, res) => {
 
     if (ct.includes('text/html')) {
       try {
-        const originalHtml = rewriteHTML(buf.toString('utf-8'), finalUrl);
-        const html = rewritePipeline.rewriteHtml(originalHtml, {
-          sourceUrl: finalUrl,
-          baseUrl: finalUrl
-        });
+        // Keep the established HTML rewrite as the single page transformation.
+        const html = rewriteHTML(buf.toString('utf-8'), finalUrl);
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         return res.send(html);
       } catch { return res.send(buf); }
     }
     if (ct.includes('text/css')) {
       try {
-        const originalCss = rewriteCSS(buf.toString('utf-8'), finalUrl);
-        const css = rewritePipeline.rewriteCss(originalCss, {
-          sourceUrl: finalUrl,
-          baseUrl: finalUrl
-        });
+        // Keep CSS on one rewrite pass.
+        const css = rewriteCSS(buf.toString('utf-8'), finalUrl);
         res.setHeader('Content-Type', 'text/css; charset=utf-8');
         return res.send(css);
       } catch { return res.send(buf); }
@@ -1320,7 +1310,9 @@ app.get('/proxy/:token', async (req, res) => {
           baseUrl: finalUrl,
           isModule: /(?:javascript|ecmascript)/i.test(ct) && /module/i.test(ct)
         });
-        return res.send(rewriteJS(advancedJs));
+        // Send the advanced transform output directly instead of applying a
+        // second JavaScript rewrite with different assumptions.
+        return res.send(advancedJs);
       } catch { return res.send(buf); }
     }
     res.setHeader('Content-Type', ct);
