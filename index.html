@@ -628,7 +628,66 @@
   window.addEventListener('error',e=>{if(e.target&&e.target!==window)devRecord('error',['Resource failed to load',e.target.src||e.target.href||e.target.tagName],'resource');else devRecord('error',[e.message||'Uncaught JavaScript error',e.filename||'',e.lineno?'line '+e.lineno:''],'window')},true);
   window.addEventListener('unhandledrejection',e=>devRecord('error',['Unhandled promise rejection:',e.reason],'promise'));
   const devFetch=window.fetch.bind(window);window.fetch=async(...args)=>{const url=typeof args[0]==='string'?args[0]:(args[0]&&args[0].url)||'',start=performance.now();try{const response=await devFetch(...args);if(!response.ok)devRecord('network',[response.status+' '+response.statusText,url,Math.round(performance.now()-start)+'ms'],'fetch');return response}catch(err){devRecord('error',['Request failed:',url,err],'fetch');throw err}};
-  function devAttachFrame(){try{const w=frame.contentWindow;if(!w||!w.document)return;['log','info','warn','error','debug'].forEach(m=>{const original=w.console[m].bind(w.console);w.console[m]=(...args)=>{original(...args);devRecord(m==='debug'?'log':m,args,'page')}});w.addEventListener('error',e=>devRecord('error',[e.message||'Page JavaScript error',e.filename||'',e.lineno?'line '+e.lineno:''],'page'));w.addEventListener('unhandledrejection',e=>devRecord('error',['Page promise rejection:',e.reason],'page'))}catch{devRecord('info',['Page console bridge unavailable for this frame.'],'page')}}
+  const devCaptchaFindings=new Set();
+  function devCaptchaFinding(key,level,message,details=[]){
+    if(devCaptchaFindings.has(key))return;
+    devCaptchaFindings.add(key);
+    devRecord(level,[message,...details],'captcha');
+  }
+  function devInspectCaptcha(){
+    try{
+      const doc=frame.contentDocument, w=frame.contentWindow;
+      if(!doc||!w||!doc.documentElement)return;
+      const bodyText=(doc.body&&doc.body.innerText||'').slice(0,250000);
+      const pageUrl=(w.location&&w.location.href)||lastTargetUrl||'unknown URL';
+      const scripts=Array.from(doc.querySelectorAll('script[src]')).map(x=>x.src);
+      const frames=Array.from(doc.querySelectorAll('iframe[src]')).map(x=>x.src);
+      const captchaUrls=[...scripts,...frames].filter(u=>/(recaptcha|captcha|hcaptcha|challenges\.cloudflare\.com|turnstile)/i.test(u));
+      if(captchaUrls.length)devCaptchaFinding('detected:'+pageUrl,'info','CAPTCHA provider detected on '+pageUrl,[...new Set(captchaUrls)].slice(0,8).join(' | ')]);
+      if(/invalid domain for site key/i.test(bodyText)){
+        devCaptchaFinding('domain:'+pageUrl,'error','CAPTCHA diagnosis: invalid domain for site key.',[
+          'The provider rejected the hostname/origin used by this proxied page.',
+          'Page: '+pageUrl,
+          'Proxy origin: '+location.origin,
+          'This is usually a site-key hostname configuration mismatch; the proxy cannot repair a third-party site key.'
+        ]);
+      }else if(/error for site owner/i.test(bodyText)&&/site key|domain/i.test(bodyText)){
+        devCaptchaFinding('owner:'+pageUrl,'warn','CAPTCHA diagnosis: provider is showing a site-owner configuration error.',[
+          'Page: '+pageUrl,
+          'Check the nearby page text and failed network requests to distinguish an invalid key, hostname mismatch, or provider configuration issue.'
+        ]);
+      }
+      if(captchaUrls.length&&/could not connect to the reCAPTCHA service|failed to load resource.*(captcha|recaptcha)/i.test(bodyText)){
+        devCaptchaFinding('load:'+pageUrl,'warn','CAPTCHA diagnosis: challenge resources may not be loading.',[
+          'Inspect the Network entries for blocked scripts, iframe requests, HTTP errors, or cookie restrictions.'
+        ]);
+      }
+      if(!w.__ultraCaptchaObserver){
+        const Observer=w.MutationObserver;
+        if(Observer){
+          w.__ultraCaptchaObserver=new Observer(()=>{try{
+            const textNow=(doc.body&&doc.body.innerText||'').slice(0,250000);
+            if(/invalid domain for site key/i.test(textNow))devCaptchaFinding('domain:'+pageUrl,'error','CAPTCHA diagnosis: invalid domain for site key.',[
+              'The provider rejected the hostname/origin used by this proxied page.',
+              'Page: '+pageUrl,'Proxy origin: '+location.origin,
+              'A third-party site key must be authorized by that site owner; do not replace or spoof their key.'
+            ]);
+            const urlsNow=Array.from(doc.querySelectorAll('script[src],iframe[src]')).map(x=>x.src).filter(u=>/(recaptcha|captcha|hcaptcha|challenges\.cloudflare\.com|turnstile)/i.test(u));
+            if(urlsNow.length)devCaptchaFinding('detected:'+pageUrl,'info','CAPTCHA provider detected on '+pageUrl,[...new Set(urlsNow)].slice(0,8).join(' | '));
+          }catch{}});
+          w.__ultraCaptchaObserver.observe(doc.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['src']});
+        }
+      }
+    }catch(err){devRecord('debug',['CAPTCHA inspection unavailable:',err],'captcha')}
+  }
+  function devAttachFrame(){try{
+    const w=frame.contentWindow;if(!w||!w.document)return;
+    ['log','info','warn','error','debug'].forEach(m=>{const original=w.console[m].bind(w.console);w.console[m]=(...args)=>{original(...args);devRecord(m==='debug'?'log':m,args,'page')}});
+    w.addEventListener('error',e=>{devRecord('error',[e.message||'Page JavaScript error',e.filename||'',e.lineno?'line '+e.lineno:''],'page');if(e.target&&e.target.src&&/(captcha|recaptcha|hcaptcha|turnstile)/i.test(e.target.src))devRecord('error',['CAPTCHA resource failed to load:',e.target.src],'captcha')},true);
+    w.addEventListener('unhandledrejection',e=>devRecord('error',['Page promise rejection:',e.reason],'page'));
+    devCaptchaFindings.clear();
+    devInspectCaptcha();
+  }catch{devRecord('info',['Page console bridge unavailable for this frame.'],'page')}}
 
   // ── Init ───────────────────────────────────────────────────────────
   setTimeout(() => si.focus(), 80);
