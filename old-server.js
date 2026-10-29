@@ -255,6 +255,35 @@ function notifyParent() {
   } catch(e) {}
 }
 
+// ── WebRTC leak protection ────────────────────────────────────────────────────
+// This HTTP proxy does not relay WebRTC's UDP/ICE traffic. Leaving the browser's
+// native peer connection available can let pages discover the client's direct
+// network addresses, bypassing the HTTP proxy. Fail closed until a TURN relay
+// can be configured; this intentionally disables WebRTC calls inside proxied pages.
+try {
+  var _rtcError = function() {
+    var err = new Error('WebRTC is disabled by Ultraproxy to prevent direct-IP leaks.');
+    err.name = 'NotAllowedError';
+    return err;
+  };
+  var _rtcBlocked = function() {
+    throw _rtcError();
+  };
+  ['RTCPeerConnection', 'webkitRTCPeerConnection', 'mozRTCPeerConnection'].forEach(function(name) {
+    try {
+      if (name in window) {
+        var NativeRTC = window[name];
+        var BlockedRTC = function() { return _rtcBlocked(); };
+        BlockedRTC.prototype = NativeRTC && NativeRTC.prototype;
+        try { Object.setPrototypeOf(BlockedRTC, NativeRTC); } catch(e) {}
+        defProp(window, name, { value: BlockedRTC, writable: false });
+      }
+    } catch(e) {}
+  });
+  // Also prevent legacy callers from obtaining a peer connection through
+  // feature-detection aliases. Media capture alone does not expose ICE IPs.
+} catch(e) {}
+
 // ── 1. window.top / parent / self / frameElement ─────────────────────────────
 try {
   defProp(window, 'top',          { get: function() { return window; } });
