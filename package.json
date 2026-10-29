@@ -1,22 +1,27 @@
 {
   "name": "ultraproxy",
-  "version": "3.0.0",
-  "description": "Full-fidelity server-side web proxy with YouTube integration",
+  "version": "5.0.0",
+  "description": "Full-fidelity web proxy: AST-based JS rewriting, per-session cookie jar, faithful request headers, WebSocket tunnel, captcha-friendly frame/postMessage handling",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "npx nodemon server.js"
+    "dev": "npx nodemon server.js",
+    "test": "node tests/run.js"
   },
+  "engines": { "node": ">=18" },
   "dependencies": {
+    "acorn": "^8.14.0",
+    "acorn-walk": "^8.3.4",
     "archiver": "^6.0.1",
-    "axios": "^1.6.0",
+    "axios": "^1.7.0",
     "cheerio": "^1.0.0",
-    "express": "^4.18.2",
-    "node-fetch": "^2.7.0",
+    "express": "^4.19.2",
     "socks-proxy-agent": "^8.0.5",
+    "tough-cookie": "^5.1.2",
+    "ws": "^8.18.0",
     "youtubei.js": "^12.0.0"
   },
   "devDependencies": {
-    "puppeteer": "^24.38.0"
+    "jsdom": "^25.0.1"
   }
 }
