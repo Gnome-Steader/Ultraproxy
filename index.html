@@ -643,7 +643,15 @@
       const scripts=Array.from(doc.querySelectorAll('script[src]')).map(x=>x.src);
       const frames=Array.from(doc.querySelectorAll('iframe[src]')).map(x=>x.src);
       const captchaUrls=[...scripts,...frames].filter(u=>/(recaptcha|captcha|hcaptcha|challenges\.cloudflare\.com|turnstile)/i.test(u));
-      if(captchaUrls.length)devCaptchaFinding('detected:'+pageUrl,'info','CAPTCHA provider detected on '+pageUrl,[...new Set(captchaUrls)].slice(0,8).join(' | ')]);
+      if(captchaUrls.length){
+        devCaptchaFinding('detected:'+pageUrl,'info','CAPTCHA provider detected on '+pageUrl,[...new Set(captchaUrls)].slice(0,8).join(' | ')]);
+        devCaptchaFinding('origin-check:'+pageUrl,'warn','CAPTCHA diagnostic: check the proxied page origin.',[
+          'Page URL: '+pageUrl,
+          'Browser-visible proxy origin: '+location.origin,
+          'If the provider reports an invalid domain/site key, the key owner must authorize the hostname where the challenge actually runs.',
+          'Cross-origin challenge iframe contents are not readable by this console; use the visible provider error and browser Network panel to confirm the cause.'
+        ]);
+      }
       if(/invalid domain for site key/i.test(bodyText)){
         devCaptchaFinding('domain:'+pageUrl,'error','CAPTCHA diagnosis: invalid domain for site key.',[
           'The provider rejected the hostname/origin used by this proxied page.',
